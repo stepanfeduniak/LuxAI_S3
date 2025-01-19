@@ -114,7 +114,7 @@ def calculate_reward(player_0,player_1,actions,obs,prev_score_player_0,prev_scor
                 reward_p1 -= wall_moves * WALL_MOVE_PENALTY 
     return reward_p0 , reward_p1
 
-def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,replay_save_dir="./agent_2/replays"):
+def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,replay_save_dir="./agents/agent_2/replays"):
     if training==True:
         env = LuxAIS3GymEnv(numpy_output=True)
     else:
@@ -238,5 +238,5 @@ def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,rep
 
 # Training
 
-evaluate_agents(Agent, Agent, training=True, games_to_play=10000) # 250*
+evaluate_agents(Agent, Agent, training=True, games_to_play=1) # 250*
 evaluate_agents(Agent, Agent, training=False, games_to_play=10)
