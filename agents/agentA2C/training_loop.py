@@ -117,197 +117,83 @@ def calculate_reward(player_0,player_1,actions,obs,prev_score_player_0,prev_scor
 def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,replay_save_dir="./agent_2/replays"):
 
 
-    if training==True:
+    if training==False:
         env = LuxAIS3GymEnv(numpy_output=True)
     else:
         env = RecordEpisode(
             LuxAIS3GymEnv(numpy_output=True), save_on_close=True, save_on_reset=True, save_dir=replay_save_dir
         )
-    # Create shared Actor (decentralized: each agent sees only its own obs)
-    # Create centralized Critic
+    game_rewards_history = {"player_0":[],"player_1":[]}
 
-
-    # Optimizers
-    
-
-    # Training hyperparameters
-
-    # For logging
-    episode_rewards_history = []
-
-    for game in range(games_to_play):
-        # Reset the environment
-        states = env.reset()  # shape [n_agents, obs_dim]
-        done = False
-
-        # Initialize memory
-        memory = MultiAgentMemory(n_agents=n_agents)
-        episode_rewards = np.zeros(n_agents, dtype=np.float32)
-
-        while not done:
-            # For each agent, get a probability distribution over actions from the actor
-            # (which only sees its own local state).
-            # Then sample an action for each agent.
-            actions = []
-            log_probs = []
-            states_torch = []
-
-            # Each agent picks an action
-            for i in range(n_agents):
-                s = torch.FloatTensor(states[i]).unsqueeze(0)  # [1, obs_dim]
-                probs = actor(s)       # [1, action_dim]
-                dist = torch.distributions.Categorical(probs)
-                action = dist.sample() # scalar
-                actions.append(int(action.item()))
-                log_probs.append(dist.log_prob(action))  # store log prob
-
-            # Convert list of actions to e.g. np array for the environment
-            actions = np.array(actions)
-            
-            # Critic (centralized) sees the global state, i.e. concat all agent states
-            global_state = torch.FloatTensor(states.flatten()).unsqueeze(0)  # [1, global_dim]
-            value = critic(global_state)  # shape [1,1]
-
-            # Step environment
-            next_states, rewards, done, info = env.step(actions)
-            episode_rewards += np.array(rewards, dtype=np.float32)
-
-            # Store transition in memory
-            memory.add(
-                log_probs,  # list of log_probs for each agent
-                value,      # single value from the critic
-                rewards,    # list of rewards
-                done
-            )
-
-            states = next_states
-
-        # At episode end, we do an A2C update
-        # final next_value can be assumed 0 if episode ended
-        # in more advanced usage, you'd handle partial episodes, but let's keep it simple.
-        train_on_episode_memory(
-            memory,
-            actor,
-            critic,
-            actor_optim,
-            critic_optim,
-            gamma=gamma
-        )
-
-        # Track total reward (sum of all agents or each agent) for monitoring
-        episode_rewards_history.append(np.sum(episode_rewards))
-
-        if (episode+1) % 100 == 0:
-            avg_reward = np.mean(episode_rewards_history[-100:])
-            print(f"Episode {episode+1}, avg reward over last 100 episodes: {avg_reward:.2f}")
-
-    print("Training complete.")
     obs, info = env.reset()
     env_cfg = info["params"]  
 
-    player_0 = Agent("player_0", info["params"], training=training)
-    player_1 = Agent("player_1", info["params"], training=training)
-    vis_priority=True
-    for i in range(games_to_play):
-        if i==150:
-             vis_priority=False
-        obs, info = env.reset()
+    player_0 = agent_1_cls("player_0", info["params"], training=training)
+    player_1 = agent_2_cls("player_1", info["params"], training=training)
+    n_agents=16
+
+
+
+    for game in range(games_to_play):
+        obs, info = env.reset()  
         game_done = False
         step = 0
-        last_obs = None
-        last_actions = None
-        print(f"{i}")
+        gamerewards={}
+        for player in [player_0.player,player_1.player]:
+            gamerewards[player] = np.zeros(n_agents, dtype=np.float32)
+        print(f"{game}")
         start_time = time.time()
         while not game_done:
-            if step%100 ==0:
-                prev_score_player_0 = 0
-                prev_score_player_1 = 0    
             actions = {}
-            
-            # Store current observation for learning
-            if training:
-                last_obs = {
-                    "player_0": obs["player_0"].copy(),
-                    "player_1": obs["player_1"].copy()
-                }
-            wall_moves_p0 = 0
-            wall_moves_p1 = 0
-            # Get actions
+            log_probs = {}
+            values ={}
+            rewards={}
+            # Convert list of actions to e.g. np array for the environment
             for agent in [player_0, player_1]:
-                actions[agent.player] = agent.act(step=step, obs=obs[agent.player])
-
-            if training:
-                last_actions = actions.copy()
+                actions[agent.player],log_probs[agent.player],values[agent.player] = agent.act(step=step, obs=obs[agent.player])
             # Environment step
             obs, rewards ,terminated, truncated, info = env.step(actions)
             dones = {
                 k: bool(terminated[k].item()) or bool(truncated[k].item())
                     for k in terminated
                 }
-            ###REWARDS###
-
-            current_score_p0 = obs["player_0"]["team_points"][player_0.team_id]
-            current_score_p1 = obs["player_1"]["team_points"][player_1.team_id]
-            if training==True:
-                reward_p0,reward_p1=calculate_reward(player_0,player_1,actions,obs,prev_score_player_0,prev_score_player_1,last_obs,vis_priority=vis_priority)
-                # Output rewards
-                if step==470:
-                    print(f"Reward 0:{reward_p0}")
-                    print(f"Reward 1:{reward_p1}")
-                rewards = {
-                    "player_0": reward_p0,
-                    "player_1": reward_p1
-                }
-
-                # After you've used the difference to set the reward,
-                # update prev_ to the current scoreboard
-                prev_score_player_0 = current_score_p0
-                prev_score_player_1 = current_score_p1  
-            # Store experiences and learn
-            if training and last_obs is not None:
+            for player in [player_0.player,player_1.player]:
+                gamerewards[player]+= np.array(1, dtype=np.float32)
+                rewards[player]=np.zeros(n_agents, dtype=np.float32)+ np.array(1, dtype=np.float32)
+            
+            ###implement_awards
+            
+            if training :
                 # Store experience for each unit
                 for agent in [player_0, player_1]:
-                    for unit_id in range(env_cfg["max_units"]):
-                        if obs[agent.player]["units_mask"][agent.team_id][unit_id]:
-                            current_state = agent._state_representation(
-                                last_obs[agent.player]["units"]["position"][agent.team_id][unit_id],
-                                last_obs[agent.player]["units"]["energy"][agent.team_id][unit_id],
-                                agent.relic_node_positions,
-                                #step,
-                                unit_id  # pass unit_id here
-                            )
-
-                            next_state = agent._state_representation(
-                                obs[agent.player]["units"]["position"][agent.team_id][unit_id],
-                                obs[agent.player]["units"]["energy"][agent.team_id][unit_id],
-                                agent.relic_node_positions,
-                                #step + 1,
-                                unit_id  # pass unit_id here
-                            )
-                            
-                            agent.memory.push(
-                                current_state,
-                                last_actions[agent.player][unit_id][0],
-                                rewards[agent.player],
-                                next_state,
-                                dones[agent.player]
-                            )
-                
-                # Learn from experiences
-                player_0.learn(step, last_obs["player_0"], actions["player_0"], 
-                             obs["player_0"], rewards["player_0"], dones["player_0"])
-                player_1.learn(step, last_obs["player_1"], actions["player_1"], 
-                             obs["player_1"], rewards["player_1"], dones["player_1"])
-                
-                
-
+                    # Store transition in memory
+                    agent.memory.add(
+                        log_probs[agent.player],  # list of log_probs for each agent
+                        values[agent.player],      # single value from the critic
+                        rewards[agent.player],    # list of rewards
+                        dones[agent.player]
+                    )
             if dones["player_0"] or dones["player_1"]:
                 game_done = True
-                if training:
+            step += 1
+                
+        
+        # At episode end, we do an A2C update
+        # final next_value can be assumed 0 if episode ended
+        # in more advanced usage, you'd handle partial episodes, but let's keep it simple.
+        for player in [player_0,player_1]:
+            player.train_on_episode_memory()
+            game_rewards_history[player.player].append(np.sum(gamerewards))
+            if (game+1) % 5 == 0:
+                avg_reward = np.mean(game_rewards_history[player.player][-5:])
+                print(f"Player:{player.player}Episode {game+1}, avg reward over last 5 episodes: {avg_reward:.2f}")
+            player.memory.clear()
+        if training:
                     player_0.save_model()
                     player_1.save_model()
+        
 
-            step += 1
+        
         end_time = time.time()
         try:
             print(f"Game time: {end_time-start_time}") 
@@ -317,7 +203,9 @@ def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,rep
       player_0.save_model()
       player_1.save_model()
 
+    print("Training complete.")
+
 # Training
 
-evaluate_agents(Agent, Agent, training=True, games_to_play=10000) # 250*
+evaluate_agents(Agent, Agent, training=True, games_to_play=3) # 250*
 evaluate_agents(Agent, Agent, training=False, games_to_play=10)
