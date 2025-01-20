@@ -7,42 +7,94 @@ import random
 import os
 import torch.nn.functional as F
 from lux.utils import direction_to
-class Actor(nn.Module):
-    """
-    Decentralized actor that only sees the local state of its agent.
-    """
-    def __init__(self, obs_dim, n_actions):
+
+class MapEncoder(nn.Module):
+    def __init__(self, in_channels, out_dim=128):
         super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(obs_dim, 64),
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten(),  # flatten to [batch_size, 32*H*W]
+        )
+        # after flatten, reduce dimension to out_dim
+        # (adjust 32*H*W below to match your actual map size, e.g. 32*24*24 if H=W=24)
+        self.fc = nn.Sequential(
+            nn.Linear(32 * 24 * 24, 256),
+            nn.ReLU(),
+            nn.Linear(256, out_dim),
+            nn.ReLU()
+        )
+        
+    def forward(self, x):
+        """
+        x shape: [batch_size, in_channels, H, W]
+        """
+        x = self.conv(x)
+        x = self.fc(x)
+        return x  # shape: [batch_size, out_dim]
+    
+
+class UnitEncoder(nn.Module):
+    def __init__(self, in_dim, out_dim=128):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, out_dim),
+            nn.ReLU()
+        )
+        
+    def forward(self, x):
+        """
+        x shape: [batch_size, in_dim]
+        """
+        return self.fc(x)  # shape: [batch_size, out_dim]
+class Actor(nn.Module):
+    def __init__(self, map_channels, unit_feature_dim, n_actions):
+        super().__init__()
+        
+        # Encoders
+        self.map_enc = MapEncoder(in_channels=map_channels, out_dim=128)
+        self.unit_enc = UnitEncoder(in_dim=unit_feature_dim, out_dim=128)
+        
+        # Combine map + unit enc outputs => final policy layer
+        self.policy_head = nn.Sequential(
+            nn.Linear(128 + 128, 64),  # concat -> 256
             nn.ReLU(),
             nn.Linear(64, n_actions),
-            nn.Softmax(dim=-1)  # important: specify dim for softmax
+            nn.Softmax(dim=-1)
         )
 
-    def forward(self, x):
-        # x shape: [batch_size, obs_dim]
-        return self.model(x)
+    def forward(self, map_input, unit_input):
+        """
+        map_input:  [batch_size, map_channels, H, W]
+        unit_input: [batch_size, unit_feature_dim]
+        """
+        map_feats = self.map_enc(map_input)       # [batch_size, 128]
+        unit_feats = self.unit_enc(unit_input)    # [batch_size, 128]
+        combined = torch.cat([map_feats, unit_feats], dim=1)  # [batch_size, 256]
+        return self.policy_head(combined)         # [batch_size, n_actions]
 class Critic(nn.Module):
-    """
-    Centralized critic that sees the global state
-    (which can be concatenation of all agents' observations, or any centralized info).
-    """
-    def __init__(self, global_state_dim):
+    def __init__(self, map_channels, unit_feature_dim):
         super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(global_state_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
+        self.map_enc = MapEncoder(in_channels=map_channels, out_dim=128)
+        self.unit_enc = UnitEncoder(in_dim=unit_feature_dim, out_dim=128)
+        
+        self.value_head = nn.Sequential(
+            nn.Linear(128 + 128, 64),
             nn.ReLU(),
             nn.Linear(64, 1)
         )
+        
+    def forward(self, map_input, unit_input):
+        map_feats = self.map_enc(map_input)     
+        unit_feats = self.unit_enc(unit_input)
+        combined = torch.cat([map_feats, unit_feats], dim=1)
+        value = self.value_head(combined)       # shape [batch_size, 1]
+        return value
 
-    def forward(self, x):
-        # x shape: [batch_size, global_state_dim]
-        return self.model(x)
 class MultiAgentMemory:
     """
     We store the transitions for all agents in parallel.
@@ -80,6 +132,58 @@ class MultiAgentMemory:
 
     def __len__(self):
         return len(self.values)
+class Playing_Map():
+    def __init__(self,player_id,size,unit_channels=2,map_channels=4,relic_channels=3):
+        self.player_id=player_id
+        self.size=size
+        self.map_channels=map_channels #
+        self.unit_channels=unit_channels
+        self.relic_channels=relic_channels
+        self.map_map=torch.zeros((size,size,map_channels))
+        self.unit_map=torch.zeros((size,size,unit_channels))
+        self.relic_map=torch.zeros((size,size,relic_channels))
+    def update_map(self,obs):
+        #Visibility, right now
+        visibility=torch.from_numpy(obs["sensor_mask"])
+        #Update map
+        rows, cols = torch.where(visibility)
+        self.map[rows, cols,1:4] = torch.nn.functional.one_hot(obs['type_type'][visibility], num_classes=3).float()
+        self.map[:,:,0]-visibility.int()
+        #Update units
+        unit_us=obs["units"]["position"][self.player_id]
+        unit_mask_us=obs["units"][self.player_id]
+        valid_positions_us = unit_us[unit_mask_us].T
+        values_us = torch.ones(valid_positions_us.shape[1], dtype=torch.float32)
+        self.unit_map[:,:,0]=0
+        self.unit_map[:,:,1]/=2
+        self.unit_map[0].index_put_((valid_positions_us[0], valid_positions_us[1]), values_us, accumulate=True)
+        unit_mask_them=obs["units"][1-self.player_id]
+        unit_them=obs["units"]["position"][1-self.player_id]
+        valid_positions_them = unit_them[unit_mask_them].T
+        values_them = torch.ones(valid_positions_them.shape[1], dtype=torch.float32)
+        self.unit_map[1].index_put_((valid_positions_them[0], valid_positions_them[1]), values_them, accumulate=True)
+        #Update relics
+        relics=obs["relic_nodes"]
+        relics_mask=obs["relic_nodes_mask"]
+        relics_pos = relics[relics_mask].T
+        self.relic_map[relics_pos[0],relics_pos[1],0]=1
+
+
+
+    def map_stack(self):
+        map_stack = torch.cat(
+                                [
+                                self.map_map,    # shape = [H, W, map_channels]
+                                self.unit_map,   # shape = [H, W, unit_channels]
+                                self.relic_map,  # shape = [H, W, relic_channels]
+                                ], 
+                                dim=-1  # last dimension, so new shape = (H, W, total_channels)
+                            )
+        map_stack = map_stack.permute(2, 0, 1)
+        return map_stack
+        
+
+
 
 # direction (0 = center, 1 = up, 2 = right, 3 = down, 4 = left)
 """def direction_to(src, target):
@@ -102,6 +206,7 @@ class MultiAgentMemory:
 
 class Agent:
     def __init__(self, player: str, env_cfg, training=True) -> None:
+        self.env_cfg=env_cfg
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
         self.team_id = 0 if self.player == "player_0" else 1
@@ -118,9 +223,9 @@ class Agent:
         self.action_size = 6 # stay, up, right, down, left, sap
         self.hidden_size = 128
         self.batch_size = 64
-        self.gamma = 0.96
-        self.learning_rate_actor = 0.001
-        self.learning_rate_critic = 0.001
+        self.gamma = 0.999
+        self.learning_rate_actor = 0.0008 
+        self.learning_rate_critic =  0.001
         self.random_location=np.array([[4, 8], [8, 0], [6, 16], [4, 6], [20, 3], [23, 1], [19, 7], [6, 8],[3, 7], [19, 15], [23, 13], [0, 13], [5, 5], [10, 16], [20, 15], [7, 23]])
         # Initialize networks
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -129,6 +234,9 @@ class Agent:
         self.memory = MultiAgentMemory(16)
         self.actor_optim = optim.Adam(self.actor.parameters(), lr=self.learning_rate_actor)
         self.critic_optim = optim.Adam(self.critic.parameters(), lr=self.learning_rate_critic)
+        # Initialize map
+        self.map=Playing_Map(self.team_id,24)
+
         
 
 
@@ -164,7 +272,11 @@ class Agent:
         self.score = np.array(obs["team_points"][self.team_id])
         observed_relic_node_positions = np.array(obs["relic_nodes"])
         observed_relic_nodes_mask = np.array(obs["relic_nodes_mask"])
-
+        self.map.update_map(obs)
+        if step==115:
+                print(obs)
+                print(self.env_cfg)
+        map[]
         # Track newly discovered relic nodes
         visible_relic_node_ids = set(np.where(observed_relic_nodes_mask)[0])
         for node_id in visible_relic_node_ids:
@@ -289,7 +401,7 @@ class Agent:
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
             'critic_optim': self.critic_optim.state_dict(),
-            'actor_optim': self.critic_optim.state_dict()
+            'actor_optim': self.actor_optim.state_dict()
         }, f'modelA2C_{self.player}.pth')
 
     def load_model(self):

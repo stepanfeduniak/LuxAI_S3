@@ -1,5 +1,5 @@
 from luxai_s3.wrappers import LuxAIS3GymEnv, RecordEpisode
-from agent import Agent
+from agent import Agent, Playing_Map
 import torch
 import numpy as np
 import warnings
@@ -113,11 +113,29 @@ def calculate_reward(player_0,player_1,actions,obs,prev_score_player_0,prev_scor
             else:
                 reward_p1 -= wall_moves * WALL_MOVE_PENALTY 
     return reward_p0 , reward_p1
+def cumulative_reward(obs,prev_obs,player):
+    NEW_POINTS_FACTOR=1
+    NEW_VISIBILITY_FACTOR=0.008
+    VISIBILITY_FACTOR=0.001
+    #if step%100==0:
+    
+    new_points=obs["team_points"][player.team_id]-prev_obs["team_points"][player.team_id]
+    #else:
+    #   return 0
+    new_visibility = np.sum(obs["sensor_mask"]) - np.sum(prev_obs["sensor_mask"])
+    visibility=np.sum(obs["sensor_mask"])
+    
+    if new_points<-1:
+         return np.array([0])
+    reward=new_points*NEW_POINTS_FACTOR+new_visibility*NEW_VISIBILITY_FACTOR+visibility*VISIBILITY_FACTOR
+    return np.array([reward],dtype=np.float32)
+    
+    
 
-def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,replay_save_dir="./agent_2/replays"):
+def evaluate_agents(agent_1_cls, agent_2_cls, replay=False, games_to_play=3,replay_save_dir="./agents/agentA2C/replays"):
+    training=True
 
-
-    if training==False:
+    if not replay:
         env = LuxAIS3GymEnv(numpy_output=True)
     else:
         env = RecordEpisode(
@@ -143,23 +161,31 @@ def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,rep
             gamerewards[player] = np.zeros(n_agents, dtype=np.float32)
         print(f"{game}")
         start_time = time.time()
+        player_0.map=Playing_Map(0,24)
+        player_1.map=Playing_Map(1,24)
         while not game_done:
+            
+            previous_obs=obs
             actions = {}
             log_probs = {}
             values ={}
             rewards={}
             # Convert list of actions to e.g. np array for the environment
             for agent in [player_0, player_1]:
+                rewards[agent.player]=np.zeros(agent.max_units, dtype=np.float32)
                 actions[agent.player],log_probs[agent.player],values[agent.player] = agent.act(step=step, obs=obs[agent.player])
             # Environment step
-            obs, rewards ,terminated, truncated, info = env.step(actions)
+            obs, wins ,terminated, truncated, info = env.step(actions)
+            
+
             dones = {
                 k: bool(terminated[k].item()) or bool(truncated[k].item())
                     for k in terminated
                 }
-            for player in [player_0.player,player_1.player]:
-                gamerewards[player]+= np.array(1, dtype=np.float32)
-                rewards[player]=np.zeros(n_agents, dtype=np.float32)+ np.array(1, dtype=np.float32)
+            for player in [player_0,player_1]:
+                new_cumulative_reward=cumulative_reward(obs[player.player],previous_obs[player.player],player)
+                gamerewards[player.player]+= new_cumulative_reward
+                rewards[player.player]+=new_cumulative_reward
             
             ###implement_awards
             
@@ -183,10 +209,10 @@ def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,rep
         # in more advanced usage, you'd handle partial episodes, but let's keep it simple.
         for player in [player_0,player_1]:
             player.train_on_episode_memory()
-            game_rewards_history[player.player].append(np.sum(gamerewards))
-            if (game+1) % 5 == 0:
+            game_rewards_history[player.player].append(np.sum(gamerewards[player.player]))
+            if (game+1) % 2 == 0:
                 avg_reward = np.mean(game_rewards_history[player.player][-5:])
-                print(f"Player:{player.player}Episode {game+1}, avg reward over last 5 episodes: {avg_reward:.2f}")
+                print(f"Player:{player.player}Episode {game+1}, avg reward over last 2 episodes: {avg_reward:.2f}")
             player.memory.clear()
         if training:
                     player_0.save_model()
@@ -206,6 +232,6 @@ def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,rep
     print("Training complete.")
 
 # Training
-
-evaluate_agents(Agent, Agent, training=True, games_to_play=3) # 250*
-evaluate_agents(Agent, Agent, training=False, games_to_play=10)
+evaluate_agents(Agent, Agent, replay=True, games_to_play=1) 
+#evaluate_agents(Agent, Agent, replay=False, games_to_play=10000)
+#evaluate_agents(Agent, Agent, replay=True, games_to_play=10) # 250*

@@ -36,8 +36,8 @@ def calculate_reward(player_0,player_1,actions,obs,prev_score_player_0,prev_scor
         center_mov_1=np.bincount(actions["player_1"][:, 0])[0]
         # Visibility reward: Encourage discovering new tiles
         # Optionally reward for new visible tiles instead of total visible tiles
-        new_visible_tiles_0 = np.sum(np.bitwise_xor(obs["player_0"]["sensor_mask"], last_obs["player_0"]["sensor_mask"]))
-        new_visible_tiles_1 = np.sum(np.bitwise_xor(obs["player_1"]["sensor_mask"], last_obs["player_1"]["sensor_mask"]))
+        new_visible_tiles_0 = np.sum(np.bitwise_xor(obs["player_0"]["sensor_mask"]- last_obs["player_0"]["sensor_mask"]))
+        new_visible_tiles_1 = np.sum(np.bitwise_xor(obs["player_1"]["sensor_mask"]- last_obs["player_1"]["sensor_mask"]))
 
         # Energy change reward: Reward for energy preservation
         energy_diff_p0 = (np.sum(obs["player_0"]["units"]["energy"]) 
@@ -170,7 +170,7 @@ def evaluate_agents(agent_1_cls, agent_2_cls, training=True, games_to_play=3,rep
             if training==True:
                 reward_p0,reward_p1=calculate_reward(player_0,player_1,actions,obs,prev_score_player_0,prev_score_player_1,last_obs,vis_priority=vis_priority)
                 # Output rewards
-                if step==470:
+                if step==470: 
                     print(f"Reward 0:{reward_p0}")
                     print(f"Reward 1:{reward_p1}")
                 rewards = {
