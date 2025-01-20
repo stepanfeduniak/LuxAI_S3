@@ -115,8 +115,8 @@ def calculate_reward(player_0,player_1,actions,obs,prev_score_player_0,prev_scor
     return reward_p0 , reward_p1
 def cumulative_reward(obs,prev_obs,player):
     NEW_POINTS_FACTOR=1
-    NEW_VISIBILITY_FACTOR=0.008
-    VISIBILITY_FACTOR=0.001
+    NEW_VISIBILITY_FACTOR=0.0
+    VISIBILITY_FACTOR=0.003
     #if step%100==0:
     
     new_points=obs["team_points"][player.team_id]-prev_obs["team_points"][player.team_id]
@@ -232,6 +232,6 @@ def evaluate_agents(agent_1_cls, agent_2_cls, replay=False, games_to_play=3,repl
     print("Training complete.")
 
 # Training
-evaluate_agents(Agent, Agent, replay=True, games_to_play=1) 
+evaluate_agents(Agent, Agent, replay=True, games_to_play=100) 
 #evaluate_agents(Agent, Agent, replay=False, games_to_play=10000)
 #evaluate_agents(Agent, Agent, replay=True, games_to_play=10) # 250*
