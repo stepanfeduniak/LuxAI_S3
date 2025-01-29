@@ -1,0 +1,2 @@
+episodes,rewards_0,rewards_1,policy_losses_0,value_losses_0,steps_per_episode,fps,match_wins_0,match_wins_1
+0,695.0,299.0,0.0,0.0,500,2.5736165174139454,4,0
