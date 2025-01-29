@@ -10,6 +10,7 @@ class ShipMemory:
         self.ship_id = ship_id
         self.device = device
         self.clear_memory()
+        self.steps_collected = 0
         
     def clear_memory(self):
         self.states = []
@@ -31,7 +32,7 @@ class ShipMemory:
             'values': self.values
         }
 class PPO_Model(nn.Module):
-    def __init__(self, state_dim, action_dim, gamma=0.99,lam=0.95,eps_clip=0.15, lr=0.0003, K_epochs=4, update_timestep=2000,device=torch.device("cpu"),entropy_coef=0.001,agent=None):
+    def __init__(self, state_dim, action_dim, gamma=0.95,lam=0.95,eps_clip=0.15, lr=0.0001, K_epochs=10, update_timestep=1,device=torch.device("cpu"),entropy_coef=0.01,agent=None):
         super(PPO_Model, self).__init__()
         self.gamma = gamma
         self.lam=lam
@@ -39,7 +40,8 @@ class PPO_Model(nn.Module):
         self.K_epochs = K_epochs
         self.device = device
         self.entropy_coef = entropy_coef
-        
+        self.update_timestep = update_timestep
+        self.step_count=0
         self.policy = ActorCritic(state_dim,action_dim).to(self.device)
         self.policy_old = ActorCritic(state_dim,action_dim).to(self.device)
         self.policy_old.load_state_dict(self.policy.state_dict())
@@ -84,15 +86,18 @@ class PPO_Model(nn.Module):
             surr1 = ratios * advantages
             surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
             loss = -torch.min(surr1, surr2) \
-                   + 0.5 * F.mse_loss(state_values.squeeze(-1), returns) \
+                   + 0.2 * F.mse_loss(state_values.squeeze(-1), returns) \
                    - self.entropy_coef * dist_entropy
 
             self.optimizer.zero_grad()
             loss.mean().backward()
             self.optimizer.step()
-        
+        self.step_count+=1
+        if self.step_count>=self.update_timestep:
+            self.update_policy()
+    def update_policy(self):
         self.policy_old.load_state_dict(self.policy.state_dict())
-
+        self.step_count=0
     def act(self, state, memory):
         """
         If you want to store transitions in memory each time you get an action.
@@ -116,23 +121,24 @@ class ActorCritic(nn.Module):
         
         # Common feature extractor
         self.shared = nn.Sequential(
-            nn.Linear(state_dim, 64),
+            nn.Linear(state_dim, 32),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(32, 32),
             nn.ReLU(),
         )
         
         # Actor head
-        self.actor = nn.Linear(64, action_dim)
+        self.actor = nn.Linear(32, action_dim)
         
         # Critic head
-        self.critic = nn.Linear(64, 1)
+        self.critic = nn.Linear(32, 1)
         
     def forward(self, state):
         x = self.shared(state)
         
         # Policy logits and value
         policy_logits = self.actor(x)
+        policy_logits *= torch.tensor([0.2,1,1,1,1])
         value = self.critic(x)
         
         return policy_logits, value
@@ -162,9 +168,9 @@ class ActorCritic(nn.Module):
 
     
 def get_state(unit_pos, nearest_relic_node_position, unit_energy):
-    state = [unit_pos[0], unit_pos[1],
-             nearest_relic_node_position[0], nearest_relic_node_position[1],
-             unit_energy]
+    state = [unit_pos[0] / 11.5 - 1, unit_pos[1] / 11.5 - 1,
+             nearest_relic_node_position[0] / 11.5 - 1, nearest_relic_node_position[1] / 11.5 - 1,
+             unit_energy / 200 - 1]
     return state 
 
 
@@ -191,7 +197,10 @@ class Agent():
             state_dim=self.state_dim,
             action_dim=self.action_dim
         )
-        self.load_model()
+        try:
+            self.load_model()
+        except:
+            pass
     def act(self, step: int, obs, remainingOverageTime: int = 60):
         unit_mask = np.array(obs["units_mask"][self.team_id]) # shape (max_units, )
         unit_positions = np.array(obs["units"]["position"][self.team_id]) # shape (max_units, 2)
@@ -259,7 +268,7 @@ class Agent():
             state=get_state(unit_pos,nearest_relic_node_position,unit_energy)
             action,_,_,_ = self.ppo.policy_old.get_action(state)
             actions[unit_id] = action"""
-        if step % 100 == 0 and len(self.memory.states) > 0:
+        if step % 100 == 1 and len(self.memory.states) > 2:
             # you might want to set memory.next_value = <some bootstrap value>
             self.memory.next_value = 0.0
             self.ppo.update(self.memory)
@@ -267,27 +276,26 @@ class Agent():
 
         return actions
     def calculate_rewards_and_dones(self,obs,new_points,done):
+        
         unit_mask = np.array(obs["units_mask"][self.team_id])
         unit_positions = np.array(obs["units"]["position"][self.team_id])
         available_unit_ids = np.where(unit_mask)[0]
-        reward=-manhattan_distance(unit_positions[available_unit_ids[0]],[23,23])
+        reward=-manhattan_distance(unit_positions[available_unit_ids[0]],[23,23])/48
         self.memory.rewards.append(reward)
         self.memory.is_terminals.append(done)
-
+        return reward
 
         
     def save_model(self):
         torch.save({
-            'policy': self.policy.state_dict(),
-            'policy_old': self.policy_old.state_dict(),
-            'optimizer': self.optimizer.state_dict()
-        }, f'modelPPO_{self.agent.player}.pth')
+            'policy': self.ppo.policy.state_dict(),
+            'optimizer': self.ppo.optimizer.state_dict()
+        }, f'modelPPO_{self.player}.pth')
 
     def load_model(self):
         try:
-            checkpoint = torch.load(f'modelPPO_{self.agent.player}.pth')
+            checkpoint = torch.load(f'modelPPO_{self.player}.pth')
             self.ppo.policy.load_state_dict(checkpoint['policy'])
-            self.ppo.policy_old.load_state_dict(checkpoint['policy_old'])
             self.ppo.optimizer.load_state_dict(checkpoint['optimizer'])
         except FileNotFoundError:
             raise FileNotFoundError(f"No trained model found for {self.agent.player}")

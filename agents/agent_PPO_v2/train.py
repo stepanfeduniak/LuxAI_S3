@@ -2,82 +2,160 @@ import numpy as np
 import torch
 import time
 import os
-import glob
-import re
+import json  # Save logs as JSON
 import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import clear_output
+from datetime import datetime
 from luxai_s3.wrappers import LuxAIS3GymEnv, RecordEpisode
 from luxai_s3.params import EnvParams
-from agent import Agent  # <-- your PPO-based Agent
-from agent_0 import Agent_0  # some baseline agent
+from agent import Agent  # PPO-based agent
+from agent_0 import Agent_0  # Baseline agent
+def graph_data(gamerewards, ema_rewards):
 
-def evaluate_agents(agent_1_cls, agent_2_cls, replay=False, games_to_play=3, replay_save_dir="./agents/agent_PPO_v2/replays"):
+    plt.figure(figsize=(10, 4))
+
+    # 1) Rewards over games
+    plt.subplot(1, 1, 1)
+    plt.plot(range(len(gamerewards)), gamerewards,ema_rewards, label="Game Reward")
+    plt.xlabel("Game #")
+    plt.ylabel("Cumulative Reward")
+    plt.title("Rewards Over Games")
+    plt.legend()
+    plt.grid()
+    plt.show()
+# Directory where logs are stored
+CHECKPOINT_DIR = "./training_logs"
+beta=0.9
+def save_checkpoint(file_path, data):
+    """Saves training logs to JSON file."""
+    with open(file_path, 'w') as f:
+        json.dump(data, f)
+
+def load_checkpoint(file_path):
+    """Loads training logs from JSON file if available."""
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    return None
+
+def evaluate_agents(agent_1_cls,
+                    agent_2_cls,
+                    replay=False,
+                    games_to_play=1000,
+                    replay_save_dir="./agents/agent_PPO_v2/replays",
+                    checkpoint_interval=10):
+    run_folder = os.path.join(CHECKPOINT_DIR)
+    os.makedirs(run_folder, exist_ok=True)
+
+    # File paths for logs
+    reward_log_path = os.path.join(run_folder, "reward_log.json")
+    ppo_log_path = os.path.join(run_folder, "ppo_log.json")
+
+    # Default log structure if no file exists
+    default_reward_logs = {
+        "gamerewards": [],
+        "ema_rewards": []
+    }
+
+    # Try to load existing logs; if they exist, continue from last
+    loaded_reward_logs = load_checkpoint(reward_log_path)
+    if loaded_reward_logs is None:
+        gamerewards = []
+        ema_rewards = []
+    else:
+        gamerewards = loaded_reward_logs.get("gamerewards", [])
+        ema_rewards = loaded_reward_logs.get("ema_rewards", [])
+
+    # Choose the env depending on whether we want replays
     if not replay:
         env = LuxAIS3GymEnv(numpy_output=True)
     else:
         env = RecordEpisode(
-            LuxAIS3GymEnv(numpy_output=True), save_on_close=True, save_on_reset=True, save_dir=replay_save_dir
+            LuxAIS3GymEnv(numpy_output=True),
+            save_on_close=True,
+            save_on_reset=True,
+            save_dir=replay_save_dir
         )
-
-    # We'll track points to compute step-based reward for each agent
-    old_points_0 = 0
-    old_points_1 = 0
-
-    for i in range(games_to_play):
-        print(f"Game {i}")
-
+    ema_reward = ema_rewards[-1] if len(ema_rewards) > 0 else 0
+    # Resume from where we left off if logs exist
+    start_game_idx = len(gamerewards)
+    graph_data(gamerewards,ema_rewards)
+    for i in range(start_game_idx, games_to_play):
+        time_start = time.time()
         obs, info = env.reset()
         env_cfg = info["params"]
-        
+
         # Create the agents
         player_0 = agent_1_cls("player_0", env_cfg)  # PPO agent
-        player_1 = agent_2_cls("player_1", env_cfg)  # baseline or some other agent
+        player_1 = agent_2_cls("player_1", env_cfg)  # baseline agent
 
-        # Initialize old points for reward calculation
-        # (We assume obs["player_0"]["team_points"][player_0.team_id] is valid)
         old_points_0 = obs["player_0"]["team_points"][player_0.team_id]
         old_points_1 = obs["player_1"]["team_points"][player_1.team_id]
-
+        game_rew = 0
         step = 0
         game_done = False
-
+        
         while not game_done:
-            actions = {}
-            for agent in [player_0, player_1]:
-                # Each agent decides its actions
-                actions[agent.player] = agent.act(step=step, obs=obs[agent.player])
-            
-            # Take one environment step
+            actions = {
+                agent.player: agent.act(step=step, obs=obs[agent.player])
+                for agent in [player_0, player_1]
+            }
             next_obs, wins, terminated, truncated, info = env.step(actions)
-            
-            # Build 'done' flags for each agent
+
             done_0 = bool(terminated["player_0"].item()) or bool(truncated["player_0"].item())
             done_1 = bool(terminated["player_1"].item()) or bool(truncated["player_1"].item())
-            
-            # Compute "new" points for reward
+
             new_points_0 = next_obs["player_0"]["team_points"][player_0.team_id]
             new_points_1 = next_obs["player_1"]["team_points"][player_1.team_id]
-            
-            # Reward is the difference in points
+
             r0 = new_points_0 - old_points_0
             r1 = new_points_1 - old_points_1
+
+            # Agent calculates its own internal shaping reward
+            game_rew += player_0.calculate_rewards_and_dones(next_obs["player_0"], r0, done_0)
             
-            # Store them in the agent's memory
-            # For the PPO agent:
-            player_0.calculate_rewards_and_dones(next_obs["player_0"],r0, done_0)
-            
-            old_points_0 = new_points_0
-            old_points_1 = new_points_1
-            
-            # Next step
+            old_points_0, old_points_1 = new_points_0, new_points_1
             obs = next_obs
             step += 1
-
-            # If either agent is done => game is done
-            if done_0 or done_1:
-                game_done = True
+            game_done = done_0 or done_1
+        ema_reward = beta * ema_reward + (1 - beta) * game_rew
         player_0.save_model()
+
+        # Log the final reward for this game
+        gamerewards.append(game_rew)
+        ema_rewards.append(ema_reward)
+
+        # Save logs every 'checkpoint_interval' games
+        if i % checkpoint_interval == 0 or i == games_to_play - 1:
+            # Save the updated reward logs
+            reward_log_data = {
+                "gamerewards": gamerewards,
+                "ema_rewards": ema_rewards
+            }
+            save_checkpoint(reward_log_path, reward_log_data)
+
+        # Visualization at key points (optional)
+        if i in [1, 10, 50, 100,200, 500, games_to_play - 1]:
+            clear_output(wait=True)
+
+            plt.figure(figsize=(10, 4))
+
+            # 1) Rewards over games
+            plt.subplot(1, 1, 1)
+            plt.plot(range(len(gamerewards)), gamerewards,ema_rewards, label="Game Reward")
+            plt.xlabel("Game #")
+            plt.ylabel("Cumulative Reward")
+            plt.title("Rewards Over Games")
+            plt.legend()
+            plt.grid()
+            plt.show()
+
+        time_finish = time.time()
+        print(f"Game {i} took {time_finish - time_start:.2f} seconds")
+
     env.close()
 
-# Actually run it
+# Run the evaluation
 if __name__ == "__main__":
-    evaluate_agents(Agent, Agent_0, replay=True, games_to_play=1000)
+    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=1000, checkpoint_interval=1)
