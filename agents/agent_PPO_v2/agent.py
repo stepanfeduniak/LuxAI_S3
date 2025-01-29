@@ -32,7 +32,7 @@ class ShipMemory:
             'values': self.values
         }
 class PPO_Model(nn.Module):
-    def __init__(self, state_dim, action_dim, gamma=0.95,lam=0.95,eps_clip=0.15, lr=0.0001, K_epochs=10, update_timestep=1,device=torch.device("cpu"),entropy_coef=0.01,agent=None):
+    def __init__(self, state_dim, action_dim, gamma=0.95,lam=0.95,eps_clip=0.15, lr=0.0001, K_epochs=5, update_timestep=1,device=torch.device("cpu"),entropy_coef=0.001,agent=None):
         super(PPO_Model, self).__init__()
         self.gamma = gamma
         self.lam=lam
@@ -280,7 +280,11 @@ class Agent():
         unit_mask = np.array(obs["units_mask"][self.team_id])
         unit_positions = np.array(obs["units"]["position"][self.team_id])
         available_unit_ids = np.where(unit_mask)[0]
-        reward=-manhattan_distance(unit_positions[available_unit_ids[0]],[23,23])/48
+        if self.player == "player_0":
+            reward=-manhattan_distance(unit_positions[available_unit_ids[0]],[23,23])/48
+        else:
+            reward=-manhattan_distance(unit_positions[available_unit_ids[0]],[0,0])/48
+
         self.memory.rewards.append(reward)
         self.memory.is_terminals.append(done)
         return reward

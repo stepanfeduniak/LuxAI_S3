@@ -82,16 +82,22 @@ def evaluate_agents(agent_1_cls,
     start_game_idx = len(gamerewards)
     graph_data(gamerewards,ema_rewards)
     for i in range(start_game_idx, games_to_play):
+        if i%2==0 or True:
+            player_PPO="player_0"
+            player_baseline="player_1"
+        else:
+            player_PPO="player_1"
+            player_baseline="player_0"
         time_start = time.time()
         obs, info = env.reset()
         env_cfg = info["params"]
 
         # Create the agents
-        player_0 = agent_1_cls("player_0", env_cfg)  # PPO agent
-        player_1 = agent_2_cls("player_1", env_cfg)  # baseline agent
-
-        old_points_0 = obs["player_0"]["team_points"][player_0.team_id]
-        old_points_1 = obs["player_1"]["team_points"][player_1.team_id]
+        player_0 = agent_1_cls(player_PPO, env_cfg)  # PPO agent
+        player_1 = agent_2_cls(player_baseline, env_cfg)  # baseline agent
+        
+        old_points_0 = obs[player_PPO]["team_points"][player_0.team_id]
+        old_points_1 = obs[player_baseline]["team_points"][player_1.team_id]
         game_rew = 0
         step = 0
         game_done = False
@@ -103,17 +109,17 @@ def evaluate_agents(agent_1_cls,
             }
             next_obs, wins, terminated, truncated, info = env.step(actions)
 
-            done_0 = bool(terminated["player_0"].item()) or bool(truncated["player_0"].item())
-            done_1 = bool(terminated["player_1"].item()) or bool(truncated["player_1"].item())
+            done_0 = bool(terminated[player_PPO].item()) or bool(truncated[player_PPO].item())
+            done_1 = bool(terminated[player_baseline].item()) or bool(truncated[player_baseline].item())
 
-            new_points_0 = next_obs["player_0"]["team_points"][player_0.team_id]
-            new_points_1 = next_obs["player_1"]["team_points"][player_1.team_id]
+            new_points_0 = next_obs[player_PPO]["team_points"][player_0.team_id]
+            new_points_1 = next_obs[player_baseline]["team_points"][player_1.team_id]
 
             r0 = new_points_0 - old_points_0
             r1 = new_points_1 - old_points_1
 
             # Agent calculates its own internal shaping reward
-            game_rew += player_0.calculate_rewards_and_dones(next_obs["player_0"], r0, done_0)
+            game_rew += player_0.calculate_rewards_and_dones(next_obs[player_PPO], r0, done_0)
             
             old_points_0, old_points_1 = new_points_0, new_points_1
             obs = next_obs
