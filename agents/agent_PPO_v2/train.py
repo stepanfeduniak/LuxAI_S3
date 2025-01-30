@@ -82,7 +82,7 @@ def evaluate_agents(agent_1_cls,
     start_game_idx = len(gamerewards)
     graph_data(gamerewards,ema_rewards)
     for i in range(start_game_idx, games_to_play):
-        if i%2==0 or True:
+        if i%2==0:
             player_PPO="player_0"
             player_baseline="player_1"
         else:
@@ -164,4 +164,4 @@ def evaluate_agents(agent_1_cls,
 
 # Run the evaluation
 if __name__ == "__main__":
-    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=1000, checkpoint_interval=1)
+    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=100000, checkpoint_interval=1)

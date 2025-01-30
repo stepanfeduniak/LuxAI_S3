@@ -31,6 +31,7 @@ class ShipMemory:
             'is_terminals': self.is_terminals,
             'values': self.values
         }
+    
 class PPO_Model(nn.Module):
     def __init__(self, state_dim, action_dim, gamma=0.95,lam=0.95,eps_clip=0.15, lr=0.0001, K_epochs=5, update_timestep=1,device=torch.device("cpu"),entropy_coef=0.001,agent=None):
         super(PPO_Model, self).__init__()
@@ -220,6 +221,7 @@ class Agent():
             if id not in self.discovered_relic_nodes_ids:
                 self.discovered_relic_nodes_ids.add(id)
                 self.relic_node_positions.append(observed_relic_node_positions[id])
+                self.relic_node_positions.append(23-observed_relic_node_positions[id])
 
         ###Try on one unit  
         if len(available_unit_ids) > 0:
@@ -280,25 +282,32 @@ class Agent():
         unit_mask = np.array(obs["units_mask"][self.team_id])
         unit_positions = np.array(obs["units"]["position"][self.team_id])
         available_unit_ids = np.where(unit_mask)[0]
-        if self.player == "player_0":
-            reward=-manhattan_distance(unit_positions[available_unit_ids[0]],[23,23])/48
+        reward=0
+        if len(self.relic_node_positions) > 0:
+            if self.player == "player_0":
+                reward=-manhattan_distance(unit_positions[available_unit_ids[0]],self.relic_node_positions[1])/(manhattan_distance([0,0],self.relic_node_positions[1])+1)
+            else:
+                reward=-manhattan_distance(unit_positions[available_unit_ids[0]],self.relic_node_positions[1])/(manhattan_distance([23,23],self.relic_node_positions[1])+1)
+        raw_award=reward
+        
+        if obs['units']['energy'][self.team_id,0]>50:
+            reward+=0.05
         else:
-            reward=-manhattan_distance(unit_positions[available_unit_ids[0]],[0,0])/48
-
+            reward-=0.05
         self.memory.rewards.append(reward)
         self.memory.is_terminals.append(done)
-        return reward
+        return raw_award
 
         
     def save_model(self):
         torch.save({
             'policy': self.ppo.policy.state_dict(),
             'optimizer': self.ppo.optimizer.state_dict()
-        }, f'modelPPO_{self.player}.pth')
+        }, f'modelPPO.pth')
 
     def load_model(self):
         try:
-            checkpoint = torch.load(f'modelPPO_{self.player}.pth')
+            checkpoint = torch.load(f'modelPPO.pth')
             self.ppo.policy.load_state_dict(checkpoint['policy'])
             self.ppo.optimizer.load_state_dict(checkpoint['optimizer'])
         except FileNotFoundError:
