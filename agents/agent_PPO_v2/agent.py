@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from map_processing import Playing_Map
 class ShipMemory:
     def __init__(self, ship_id, device=torch.device("cpu")):
         self.ship_id = ship_id
@@ -31,7 +32,137 @@ class ShipMemory:
             'is_terminals': self.is_terminals,
             'values': self.values
         }
+class MapEncoder(nn.Module):
+    def __init__(self, in_channels, out_dim=64):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 24, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten(),  # flatten to [batch_size, 32*H*W]
+        )
+        # after flatten, reduce dimension to out_dim
+        # (adjust 32*H*W below to match your actual map size, e.g. 32*24*24 if H=W=24)
+        self.fc = nn.Sequential(
+            nn.Linear(24 * 24 * 24, 128),
+            nn.ReLU(),
+            nn.Linear(128, out_dim),
+            nn.ReLU()
+        )
+        
+    def forward(self, x):
+        """
+        x shape: [batch_size, in_channels, H, W]
+        """
+        x = self.conv(x)
+        x = self.fc(x)
+        return x  # shape: [batch_size, out_dim]
+class UnitEncoder(nn.Module):
+    def __init__(self, in_dim, out_dim=64):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, out_dim),
+            nn.ReLU()
+        )
+        
+    def forward(self, x):
+        """
+        x shape: [batch_size, in_dim]
+        """
+        return self.fc(x)
+
+class Actor(nn.Module):
+    def __init__(self, map_encoding_dim, unit_feature_dim, n_actions):
+        super().__init__()
+        
+        # Encoders
+        
+        self.unit_enc = UnitEncoder(in_dim=unit_feature_dim, out_dim=64)
+        
+        # Combine map + unit enc outputs => final policy layer
+        self.policy_head = nn.Sequential(
+            nn.Linear(map_encoding_dim + 64, 64),  # concat -> 256
+            nn.ReLU(),
+            nn.Linear(64, n_actions),
+            nn.Softmax(dim=-1)
+        )
+
+    def forward(self, map_encoding, unit_input):
+        """
+        map_input:  [batch_size, map_channels, H, W]
+        unit_input: [batch_size, unit_feature_dim]
+        """
+        unit_feats = self.unit_enc(unit_input)# [batch_size, 128]
+        map_feats = map_encoding.repeat(unit_feats.shape[0], 1)
+            
+        combined = torch.cat([map_feats, unit_feats], dim=1)  # [batch_size, 256]
+        action_probs=self.policy_head(combined)      # [batch_size, n_actions]
+        return  action_probs       # [batch_size, n_actions]
+class Critic(nn.Module):
+    def __init__(self, map_encoding_dim):
+        super().__init__()        
+        self.value_head = nn.Sequential(
+            nn.Linear(map_encoding_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+        
+    def forward(self, map_encoding):    
+        value = self.value_head(map_encoding)       # shape [batch_size, 1]
+        return value
+class ActorCritic(nn.Module):
+    def __init__(self,map_channels_input, unit_feature_dim, action_dim):
+        super(ActorCritic, self).__init__()
+        self.map_encoding_dim = 128
+        self.mapencoder=MapEncoder(4,self.map_encoding_dim)
+        # Separate actor and critic networks
+        self.actor = Actor(map_channels=map_channels_input, unit_feature_dim=unit_feature_dim, n_actions=action_dim)
+        self.critic = Critic(self.map_encoding_dim)
+    def encode_map(self, map_input):
+        self.map_encoding = self.mapencoder(map_input) 
+        
+    def forward(self, unit_states):
+        
+        # Extract map and unit features from states
+        map_input = self.map_encoding  # Reshape for map channels
+        unit_input = unit_states  # Unit features
+        
+        # Get policy and value
+        policy = self.actor(map_input, unit_input)
+        value = self.critic(map_input)
+        
+        return policy, value
+
+    def evaluate(self,map_state, state, action):
+        map_encoding = self.mapencoder(map_state) 
+        policy= self.actor(map_encoding, state)
+        value = self.critic(map_encoding)
+        
+        # Categorical distribution
+        dist = torch.distributions.Categorical(probs=policy)
+        
+        # Calculate log probabilities
+        logprobs = dist.log_prob(action)
+        
+        # Entropy
+        dist_entropy = dist.entropy()
+        
+        return logprobs, value, dist_entropy
     
+    def get_action(self, states):
+        policy, value = self.forward(states)
+        
+        # Categorical distribution 
+        dist = torch.distributions.Categorical(probs=policy)
+        action = dist.sample()
+        
+        return action.item(), dist.log_prob(action), dist, value
+
 class PPO_Model(nn.Module):
     def __init__(self, state_dim, action_dim, gamma=0.95,lam=0.95,eps_clip=0.15, lr=0.0001, K_epochs=5, update_timestep=1,device=torch.device("cpu"),entropy_coef=0.001,agent=None):
         super(PPO_Model, self).__init__()
@@ -74,14 +205,15 @@ class PPO_Model(nn.Module):
     def update(self, memory):
         advantages, returns = self.compute_gae(memory)
         
-        old_states = torch.stack(memory.states).to(self.device).detach()
+        old_unit_states = torch.stack(memory.states).to(self.device).detach()
+        old_map_states = torch.stack(memory.map_states).to(self.device).detach()
         old_actions = torch.stack(memory.actions).to(self.device).detach()
         old_logprobs = torch.stack(memory.logprobs).to(self.device).detach()
         returns = returns.to(self.device).detach()
         advantages = advantages.to(self.device).detach()
         
         for _ in range(self.K_epochs):
-            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
+            logprobs, state_values, dist_entropy = self.policy.evaluate(old_unit_states, old_actions)
             ratios = torch.exp(logprobs - old_logprobs)
 
             surr1 = ratios * advantages
@@ -114,59 +246,6 @@ class PPO_Model(nn.Module):
 
         return action
 
-
-    
-class ActorCritic(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(ActorCritic, self).__init__()
-        
-        # Common feature extractor
-        self.shared = nn.Sequential(
-            nn.Linear(state_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, 32),
-            nn.ReLU(),
-        )
-        
-        # Actor head
-        self.actor = nn.Linear(32, action_dim)
-        
-        # Critic head
-        self.critic = nn.Linear(32, 1)
-        
-    def forward(self, state):
-        x = self.shared(state)
-        
-        # Policy logits and value
-        policy_logits = self.actor(x)
-        policy_logits *= torch.tensor([0.2,1,1,1,1])
-        value = self.critic(x)
-        
-        return policy_logits, value
-    def evaluate(self, state, action):
-        policy_logits, value = self.forward(state)
-        
-        # Categorical distribution
-        dist = torch.distributions.Categorical(logits=policy_logits)
-        
-        # Calculate the log probabilities
-        logprobs = dist.log_prob(action)
-        
-        # Entropy
-        dist_entropy = dist.entropy()
-        
-        return logprobs, value, dist_entropy
-    
-    def get_action(self, state):
-        policy_logits, value = self.forward(state)
-        
-        # Categorical distribution
-        dist = torch.distributions.Categorical(logits=policy_logits)
-        action = dist.sample()
-        
-        return action.item(), dist.log_prob(action), dist, value
-
-
     
 def get_state(unit_pos, nearest_relic_node_position, unit_energy):
     state = [unit_pos[0] / 11.5 - 1, unit_pos[1] / 11.5 - 1,
@@ -193,6 +272,9 @@ class Agent():
         self.unit_explore_locations = dict()
         self.device=torch.device("cpu")
         self.memory=ShipMemory(0,device=self.device)
+        #map
+        self.play_map=Playing_Map(self.team_id,env_cfg["map_width"],unit_channels=2,map_channels=4,relic_channels=3)
+        #model params and model
         self.action_dim = 5
         self.ppo = PPO_Model(
             state_dim=self.state_dim,
@@ -216,7 +298,7 @@ class Agent():
         visible_relic_node_ids = set(np.where(observed_relic_nodes_mask)[0])
         
         actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
-
+        self.play_map.update_map(obs)
         for id in visible_relic_node_ids:
             if id not in self.discovered_relic_nodes_ids:
                 self.discovered_relic_nodes_ids.add(id)
@@ -260,40 +342,29 @@ class Agent():
                     rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
                     self.unit_explore_locations[unit_id] = rand_loc
                 actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
-        """for unit_id in available_unit_ids:
-            unit_pos = unit_positions[unit_id]
-            unit_energy = unit_energys[unit_id]
-            if len(self.relic_node_positions) > 0:
-                nearest_relic_node_position = self.relic_node_positions[0]
-            else:
-                nearest_relic_node_position = np.array([0,0])
-            state=get_state(unit_pos,nearest_relic_node_position,unit_energy)
-            action,_,_,_ = self.ppo.policy_old.get_action(state)
-            actions[unit_id] = action"""
         if step % 100 == 1 and len(self.memory.states) > 2:
             # you might want to set memory.next_value = <some bootstrap value>
             self.memory.next_value = 0.0
             self.ppo.update(self.memory)
             self.memory.clear_memory()
+            
 
         return actions
-    def calculate_rewards_and_dones(self,obs,new_points,done):
+    def calculate_rewards_and_dones(self,obs,last_obs,env_cfg,new_points,done):
         
         unit_mask = np.array(obs["units_mask"][self.team_id])
         unit_positions = np.array(obs["units"]["position"][self.team_id])
         available_unit_ids = np.where(unit_mask)[0]
+        new_visible_tiles = np.sum(np.bitwise_xor(obs["sensor_mask"], last_obs["sensor_mask"]))
+        visibility_coef=1/((env_cfg["unit_sensor_range"]*2+1)**2)
+        visible_tiles=visibility_coef*np.sum(obs["sensor_mask"])/(24*24)
         reward=0
-        if len(self.relic_node_positions) > 0:
-            if self.player == "player_0":
-                reward=-manhattan_distance(unit_positions[available_unit_ids[0]],self.relic_node_positions[1])/(manhattan_distance([0,0],self.relic_node_positions[1])+1)
-            else:
-                reward=-manhattan_distance(unit_positions[available_unit_ids[0]],self.relic_node_positions[1])/(manhattan_distance([23,23],self.relic_node_positions[1])+1)
+        reward+=visible_tiles
         raw_award=reward
-        
-        if obs['units']['energy'][self.team_id,0]>50:
+        """if obs['units']['energy'][self.team_id,0]>50:
             reward+=0.05
         else:
-            reward-=0.05
+            reward-=0.05"""
         self.memory.rewards.append(reward)
         self.memory.is_terminals.append(done)
         return raw_award

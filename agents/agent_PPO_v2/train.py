@@ -89,9 +89,12 @@ def evaluate_agents(agent_1_cls,
             player_PPO="player_1"
             player_baseline="player_0"
         time_start = time.time()
+        
+        #game setup
         obs, info = env.reset()
         env_cfg = info["params"]
 
+        last_obs=obs
         # Create the agents
         player_0 = agent_1_cls(player_PPO, env_cfg)  # PPO agent
         player_1 = agent_2_cls(player_baseline, env_cfg)  # baseline agent
@@ -119,7 +122,7 @@ def evaluate_agents(agent_1_cls,
             r1 = new_points_1 - old_points_1
 
             # Agent calculates its own internal shaping reward
-            game_rew += player_0.calculate_rewards_and_dones(next_obs[player_PPO], r0, done_0)
+            game_rew += player_0.calculate_rewards_and_dones(next_obs[player_PPO],last_obs[player_PPO],env_cfg, r0, done_0)
             
             old_points_0, old_points_1 = new_points_0, new_points_1
             obs = next_obs
@@ -131,7 +134,7 @@ def evaluate_agents(agent_1_cls,
         # Log the final reward for this game
         gamerewards.append(game_rew)
         ema_rewards.append(ema_reward)
-
+        last_obs=obs
         # Save logs every 'checkpoint_interval' games
         if i % checkpoint_interval == 0 or i == games_to_play - 1:
             # Save the updated reward logs
@@ -164,4 +167,4 @@ def evaluate_agents(agent_1_cls,
 
 # Run the evaluation
 if __name__ == "__main__":
-    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=100000, checkpoint_interval=1)
+    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=10, checkpoint_interval=1)
