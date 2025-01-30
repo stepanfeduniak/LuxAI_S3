@@ -6,15 +6,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from map_processing import Playing_Map
+
 class ShipMemory:
     def __init__(self, ship_id, device=torch.device("cpu")):
         self.ship_id = ship_id
         self.device = device
         self.clear_memory()
-        self.steps_collected = 0
+        self.steps_collected = 0    
+        
         
     def clear_memory(self):
-        self.states = []
+        self.unit_states = []
+        self.map_states = []
         self.actions = []
         self.logprobs = []
         self.rewards = []
@@ -25,7 +28,8 @@ class ShipMemory:
 
     def get_batch(self):
         return {
-            'states': self.states,
+            'unit_states': self.unit_states,
+            'map_states': self.map_states,
             'actions': self.actions,
             'logprobs': self.logprobs,
             'rewards': self.rewards,
@@ -40,20 +44,7 @@ class FleetMemory:
     def clear_memory(self):
         for ship in self.ships:
             ship.clear_memory()
-    def get_trajectories(self):
-        trajectories = []
-        for ship in self.ships:
-            if len(ship.states) > 0:
-                trajectory = {
-                    'states': torch.stack(ship.states).to(ship.device),
-                    'actions': torch.stack(ship.actions).to(ship.device),
-                    'logprobs': torch.stack(ship.logprobs).to(ship.device),
-                    'rewards': torch.tensor(ship.rewards).to(ship.device),
-                    'is_terminals': torch.tensor(ship.is_terminals).to(ship.device),
-                    'values': torch.tensor(ship.values).to(ship.device)
-                }
-                trajectories.append(trajectory)
-        return trajectories
+    
 class MapEncoder(nn.Module):
     def __init__(self, in_channels, out_dim=64):
         super().__init__()
@@ -202,9 +193,9 @@ class PPO_Model(nn.Module):
         self.agent = agent
         self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
     def compute_gae(self, trajectory):
-        rewards = trajectory.rewards
-        values = trajectory.values
-        dones = trajectory.is_terminals
+        rewards = trajectory['rewards']
+        values = trajectory['values']
+        dones = trajectory['is_terminals']
 
         # Convert to python list or torch
         values = [v.item() if isinstance(v, torch.Tensor) else v for v in values]
@@ -225,29 +216,79 @@ class PPO_Model(nn.Module):
         returns = advantages + torch.FloatTensor(values[:-1])
         return advantages, returns
     
-    def update(self, memory):
-        advantages, returns = self.compute_gae(memory)
-        
-        old_unit_states = torch.stack(memory.states).to(self.device).detach()
-        old_map_states = torch.stack(memory.map_states).to(self.device).detach()
-        old_actions = torch.stack(memory.actions).to(self.device).detach()
-        old_logprobs = torch.stack(memory.logprobs).to(self.device).detach()
-        returns = returns.to(self.device).detach()
-        advantages = advantages.to(self.device).detach()
-        
+    def get_trajectories(self,fleet_memory):
+        trajectories = []
+        for ship in fleet_memory.ships:
+            if len(ship.states) > 0:
+                trajectory = {
+                    'unit_states': torch.stack(ship.unit_states).to(ship.device),
+                    'map_states': torch.stack(ship.map_states).to(ship.device),
+                    'actions': torch.stack(ship.actions).to(ship.device),
+                    'logprobs': torch.stack(ship.logprobs).to(ship.device),
+                    'rewards': torch.tensor(ship.rewards).to(ship.device),
+                    'is_terminals': torch.tensor(ship.is_terminals).to(ship.device),
+                    'values': torch.tensor(ship.values).to(ship.device)
+                }
+                trajectories.append(trajectory)
+        for trajectory in trajectories:
+            advantages, returns = self.compute_gae(trajectory)
+            trajectory['advantages'] = advantages
+            trajectory['returns'] = returns
+            
+        return trajectories
+    
+    def trajectories_to_train_data(trajectories):
+
+        unit_states = torch.cat([traj['unit_states'] for traj in trajectories], dim=0)
+        map_states = torch.cat([traj['map_states'] for traj in trajectories], dim=0)
+        actions = torch.cat([traj['actions'] for traj in trajectories], dim=0)
+        logprobs = torch.cat([traj['logprobs'] for traj in trajectories], dim=0)
+        advantages = torch.cat([traj['advantages'] for traj in trajectories], dim=0)
+        returns = torch.cat([traj['returns'] for traj in trajectories], dim=0)
+
+        return states, actions, logprobs, advantages, returns
+    def ppo_data_loader(unit_states,map_states, actions, logprobs, advantages, returns, batch_size):
+        dataset_size = unit_states.size(0)
+        indices = torch.randperm(dataset_size)  # shuffle indices
+
+        for start_idx in range(0, dataset_size, batch_size):
+            end_idx = start_idx + batch_size
+            batch_indices = indices[start_idx:end_idx]
+
+            yield (unit_states[batch_indices],
+                   map_states[batch_indices],
+                actions[batch_indices],
+                logprobs[batch_indices],
+                advantages[batch_indices],
+                returns[batch_indices])
+    """  
+    def trajectories_to_train_data(self,trajectories):
+        states = torch.cat([t['states'] for t in trajectories])
+        actions = torch.cat([t['actions'] for t in trajectories])
+        logprobs = torch.cat([t['logprobs'] for t in trajectories])
+        returns = torch.cat([t['returns'] for t in trajectories])
+        advantages = torch.cat([t['advantages'] for t in trajectories])
+        return states, actions, logprobs, returns, advantages"""
+
+
+    def update(self, fleet_memory):
+        trajectories = self.get_trajectories(fleet_memory)
+        old_unit_states,old_map_states, old_actions, old_logprobs, advantages, returns = self.trajectories_to_train_data(trajectories)
+
         for _ in range(self.K_epochs):
-            logprobs, state_values, dist_entropy = self.policy.evaluate(old_unit_states, old_actions)
-            ratios = torch.exp(logprobs - old_logprobs)
+            for old_unit_states_batch,old_map_states_batch, old_actions_batch, old_logprob_batch, advantage_batch, return_batch in self.ppo_data_loader(old_unit_states,old_map_states, old_actions, old_logprobs, advantages, returns, batch_size=64):
+                logprobs, state_values, dist_entropy = self.policy.evaluate(old_unit_states_batch,old_map_states_batch, old_actions_batch)
+                ratios = torch.exp(logprobs - old_logprob_batch)
 
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
-            loss = -torch.min(surr1, surr2) \
-                   + 0.2 * F.mse_loss(state_values.squeeze(-1), returns) \
-                   - self.entropy_coef * dist_entropy
+                surr1 = ratios * advantages
+                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantage_batch
+                loss = -torch.min(surr1, surr2) \
+                    + 0.2 * F.mse_loss(state_values.squeeze(-1), return_batch) \
+                    - self.entropy_coef * dist_entropy
 
-            self.optimizer.zero_grad()
-            loss.mean().backward()
-            self.optimizer.step()
+                self.optimizer.zero_grad()
+                loss.mean().backward()
+                self.optimizer.step()
         self.step_count+=1
         if self.step_count>=self.update_timestep:
             self.update_policy()
