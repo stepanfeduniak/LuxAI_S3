@@ -32,6 +32,28 @@ class ShipMemory:
             'is_terminals': self.is_terminals,
             'values': self.values
         }
+class FleetMemory:
+    def __init__(self, max_ships, device=torch.device("cpu")):
+        self.max_ships = max_ships
+        self.ships = [ShipMemory(i,device)for i in range(max_ships)]
+        
+    def clear_memory(self):
+        for ship in self.ships:
+            ship.clear_memory()
+    def get_trajectories(self):
+        trajectories = []
+        for ship in self.ships:
+            if len(ship.states) > 0:
+                trajectory = {
+                    'states': torch.stack(ship.states).to(ship.device),
+                    'actions': torch.stack(ship.actions).to(ship.device),
+                    'logprobs': torch.stack(ship.logprobs).to(ship.device),
+                    'rewards': torch.tensor(ship.rewards).to(ship.device),
+                    'is_terminals': torch.tensor(ship.is_terminals).to(ship.device),
+                    'values': torch.tensor(ship.values).to(ship.device)
+                }
+                trajectories.append(trajectory)
+        return trajectories
 class MapEncoder(nn.Module):
     def __init__(self, in_channels, out_dim=64):
         super().__init__()
@@ -179,14 +201,14 @@ class PPO_Model(nn.Module):
         self.policy_old.load_state_dict(self.policy.state_dict())
         self.agent = agent
         self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
-    def compute_gae(self, memory):
-        rewards = memory.rewards
-        values = memory.values
-        dones = memory.is_terminals
+    def compute_gae(self, trajectory):
+        rewards = trajectory.rewards
+        values = trajectory.values
+        dones = trajectory.is_terminals
 
         # Convert to python list or torch
         values = [v.item() if isinstance(v, torch.Tensor) else v for v in values]
-        values.append(memory.next_value)  # bootstrap
+        values.append(trajectory.next_value)  # bootstrap
 
         advantages = []
         gae = 0
@@ -202,6 +224,7 @@ class PPO_Model(nn.Module):
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         returns = advantages + torch.FloatTensor(values[:-1])
         return advantages, returns
+    
     def update(self, memory):
         advantages, returns = self.compute_gae(memory)
         
