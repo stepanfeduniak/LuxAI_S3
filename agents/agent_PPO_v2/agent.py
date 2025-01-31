@@ -138,11 +138,10 @@ class ActorCritic(nn.Module):
         self.critic = Critic(self.map_encoding_dim)
     def encode_map(self, map_input):
         self.map_encoding = self.mapencoder(map_input) 
-        
-    def forward(self, unit_states):
+    def forward(self, unit_states,map_state):
         
         # Extract map and unit features from states
-        map_input = self.map_encoding  # Reshape for map channels
+        map_input = self.encode_map(map_state)  # Reshape for map channels
         unit_input = unit_states  # Unit features
         
         # Get policy and value
@@ -167,14 +166,21 @@ class ActorCritic(nn.Module):
         
         return logprobs, value, dist_entropy
     
-    def get_action(self, states):
-        policy, value = self.forward(states)
-        
-        # Categorical distribution 
+    def get_action(self, unit_states, map_state):
+        """
+        unit_states: shape [batch_size, unit_feature_dim]
+        map_state:   shape [batch_size, map_channels, H, W] 
+                    (or [1, map_channels, H, W] if you're encoding once and repeating,
+                    but in your example, you do a single forward pass for all units)
+        """
+        policy, value = self.forward(unit_states, map_state)
         dist = torch.distributions.Categorical(probs=policy)
-        action = dist.sample()
         
-        return action.item(), dist.log_prob(action), dist, value
+        # These will be shape [batch_size]
+        actions = dist.sample()
+        log_probs = dist.log_prob(actions)
+        
+        return actions, log_probs, dist, value
 
 class PPO_Model(nn.Module):
     def __init__(self, state_dim, action_dim, gamma=0.95,lam=0.95,eps_clip=0.15, lr=0.0001, K_epochs=5, update_timestep=1,device=torch.device("cpu"),entropy_coef=0.001,agent=None):
@@ -246,7 +252,7 @@ class PPO_Model(nn.Module):
         advantages = torch.cat([traj['advantages'] for traj in trajectories], dim=0)
         returns = torch.cat([traj['returns'] for traj in trajectories], dim=0)
 
-        return states, actions, logprobs, advantages, returns
+        return unit_states,map_states, actions, logprobs, advantages, returns
     def ppo_data_loader(unit_states,map_states, actions, logprobs, advantages, returns, batch_size):
         dataset_size = unit_states.size(0)
         indices = torch.randperm(dataset_size)  # shuffle indices
@@ -295,20 +301,32 @@ class PPO_Model(nn.Module):
     def update_policy(self):
         self.policy_old.load_state_dict(self.policy.state_dict())
         self.step_count=0
-    def act(self, state, memory):
+    def act(self, unit_states, map_stack, fleet_memory, unit_ids):
         """
-        If you want to store transitions in memory each time you get an action.
+        unit_states: np.array or torch.tensor of shape [num_units, state_dim]
+        map_stack:   torch.tensor of shape [1, map_channels, H, W] or
+                    [num_units, map_channels, H, W]
+        unit_ids:    list or array of the actual unit IDs (indices)
         """
-        state_t = torch.FloatTensor(state).to(self.device)
-        action, log_prob, dist, value = self.policy_old.get_action(state_t)
-
-        # store
-        memory.states.append(state_t)
-        memory.actions.append(torch.tensor(action))
-        memory.logprobs.append(log_prob)
-        memory.values.append(value)
-
-        return action
+        # Convert unit_states to torch if not already
+        unit_states_t = torch.tensor(unit_states, dtype=torch.float32, device=self.device)
+        # Evaluate with policy_old
+        with torch.no_grad():
+            actions_t, log_probs_t, dist, values_t = self.policy_old.get_action(unit_states_t, map_stack)
+            # actions_t: [num_units], log_probs_t: [num_units], values_t: [num_units, 1]
+        
+        # Convert to CPU numpy if you need it for your environment step
+        actions_np = actions_t.cpu().numpy()  # shape [num_units]
+        
+        # Record in fleet memory:
+        for i, unit_id in enumerate(unit_ids):
+            # Each ship memory has lists to append to
+            fleet_memory.ships[unit_id].unit_states.append(unit_states_t[i].clone())
+            fleet_memory.ships[unit_id].map_states.append(map_stack.clone())  # or the repeated slice
+            fleet_memory.ships[unit_id].actions.append(actions_t[i].clone())
+            fleet_memory.ships[unit_id].logprobs.append(log_probs_t[i].clone())
+            fleet_memory.ships[unit_id].values.append(values_t[i].clone())
+        return actions_np
 
     
 def get_state(unit_pos, nearest_relic_node_position, unit_energy):
@@ -335,7 +353,7 @@ class Agent():
         self.discovered_relic_nodes_ids = set()
         self.unit_explore_locations = dict()
         self.device=torch.device("cpu")
-        self.memory=ShipMemory(0,device=self.device)
+        self.fleet_mem=FleetMemory(16,device=self.device)
         #map
         self.play_map=Playing_Map(self.team_id,env_cfg["map_width"],unit_channels=2,map_channels=4,relic_channels=3)
         #model params and model
@@ -355,7 +373,7 @@ class Agent():
         observed_relic_node_positions = np.array(obs["relic_nodes"]) # shape (max_relic_nodes, 2)
         observed_relic_nodes_mask = np.array(obs["relic_nodes_mask"]) # shape (max_relic_nodes, )
         team_points = np.array(obs["team_points"]) # points of each team, team_points[self.team_id] is the points of the your team
-        
+        self.play_map.update_map(obs)
         # ids of units you can control at this timestep
         available_unit_ids = np.where(unit_mask)[0]
         # visible relic nodes
@@ -368,9 +386,12 @@ class Agent():
                 self.discovered_relic_nodes_ids.add(id)
                 self.relic_node_positions.append(observed_relic_node_positions[id])
                 self.relic_node_positions.append(23-observed_relic_node_positions[id])
-
+                self.play_map.add_relic(observed_relic_node_positions[id])
+        
+        map_data_single = self.play_map.map_stack().unsqueeze(0).to(self.device)
+        self.ppo.policy.encode_map(map_data_single)
         ###Try on one unit  
-        if len(available_unit_ids) > 0:
+        """if len(available_unit_ids) > 0:
             unit_0 = available_unit_ids[0]
             unit_pos = unit_positions[unit_0]
             unit_energy = unit_energys[unit_0]
@@ -383,10 +404,32 @@ class Agent():
             # get PPO action
             action_idx = self.ppo.act(state, self.memory)  
 
-            actions[unit_0] = [action_idx, 0, 0]
+            actions[unit_0] = [action_idx, 0, 0]"""
+        unit_states=[]
+        for unit_id in available_unit_ids:
+            unit_pos = unit_positions[unit_id]
+            unit_energy = unit_energys[unit_id]
+            if len(self.relic_node_positions) > 0:
+                nearest_relic_node_position = self.relic_node_positions[0]
+            else:
+                nearest_relic_node_position = np.array([0,0])
+            state = get_state(unit_pos, nearest_relic_node_position, unit_energy)
+            unit_states.append(state)
+        actions_np=self.ppo.act(unit_states,map_data_single,self.fleet_mem,available_unit_ids)
 
+        actions_array = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
 
-        for unit_id in available_unit_ids[1:]:
+    # Suppose we compute `actions_np = self.ppo.act(unit_states, map_stack, self.fleet_mem, available_unit_ids)`
+    # which is shape [len(available_unit_ids)]
+    
+        for i, unit_id in enumerate(available_unit_ids):
+            action_idx = actions_np[i]
+            # for example, place it in [unit_id, 0], or in the first dimension
+            actions_array[unit_id, 0] = action_idx
+            # you can decide what to do with the 2nd and 3rd elements (like 0, 0 for no power, etc.)
+            actions_array[unit_id, 1] = 0
+            actions_array[unit_id, 2] = 0
+        """for unit_id in available_unit_ids[1:]:
             unit_pos = unit_positions[unit_id]
             unit_energy = unit_energys[unit_id]
             if len(self.relic_node_positions) > 0:
@@ -405,8 +448,8 @@ class Agent():
                 if step % 20 == 0 or unit_id not in self.unit_explore_locations:
                     rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
                     self.unit_explore_locations[unit_id] = rand_loc
-                actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
-        if step % 100 == 1 and len(self.memory.states) > 2:
+                actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]"""
+        if step % 100 == 1 and len(self.fleet_mem.ships[0].unit_states) > 2:
             # you might want to set memory.next_value = <some bootstrap value>
             self.memory.next_value = 0.0
             self.ppo.update(self.memory)
