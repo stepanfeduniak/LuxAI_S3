@@ -1,15 +1,15 @@
 import torch
 class Playing_Map():
-    def __init__(self,player_id,size,unit_channels=2,map_channels=4,relic_channels=3):
+    def __init__(self,player_id,map_size,unit_channels=2,map_channels=4,relic_channels=3):
         self.player_id=player_id
-        self.size=size
+        self.size=map_size
         self.map_channels=map_channels #
         self.unit_channels=unit_channels
         self.relic_channels=relic_channels
         self.channels=map_channels+unit_channels+relic_channels
-        self.map_map=torch.zeros((size,size,map_channels))
-        self.unit_map=torch.zeros((size,size,unit_channels))
-        self.relic_map=torch.zeros((size,size,relic_channels))
+        self.map_map=torch.zeros((map_size,map_size,map_channels))
+        self.unit_map=torch.zeros((map_size,map_size,unit_channels))
+        self.relic_map=torch.zeros((map_size,map_size,relic_channels))
     def add_relic(self,pos):
         x,y=pos
         self.relic_map[max(0,x-2):min(23,x+2),max(0,y-2):min(23,y+2),0]=1
@@ -20,7 +20,12 @@ class Playing_Map():
         valid_positions_us = unit_us[unit_mask_us].T
         expected_reward=sum(self.relic_map[valid_positions_us[0],valid_positions_us[1],0]>=2)
         actual_reward=obs["team_points"][self.player_id]-last_obs["team_points"][self.player_id]
-        self.relic_map[valid_positions_us[0],valid_positions_us[1],0]>0 +=0.5*(actual_reward-expected_reward)
+        # 1) Create mask: which entries are > 0?
+        musk = self.relic_map[valid_positions_us[0], valid_positions_us[1], 0] > 0
+
+        # 2) Use this mask to index into relic_map and do the in-place add
+        self.relic_map[valid_positions_us[0][musk], valid_positions_us[1][musk], 0] += 0.5 * (actual_reward - expected_reward)
+
         
     def update_map(self,obs):
         #Visibility, right now
@@ -48,6 +53,7 @@ class Playing_Map():
         relics_mask=obs["relic_nodes_mask"]
         relics_pos = relics[relics_mask].T
         self.relic_map[relics_pos[0],relics_pos[1],0]=1
+
 
 
     def map_stack(self):

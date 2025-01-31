@@ -80,7 +80,7 @@ def evaluate_agents(agent_1_cls,
     ema_reward = ema_rewards[-1] if len(ema_rewards) > 0 else 0
     # Resume from where we left off if logs exist
     start_game_idx = len(gamerewards)
-    graph_data(gamerewards,ema_rewards)
+    #graph_data(gamerewards,ema_rewards)
     for i in range(start_game_idx, games_to_play):
         if i%2==0:
             player_PPO="player_0"
@@ -110,6 +110,7 @@ def evaluate_agents(agent_1_cls,
                 agent.player: agent.act(step=step, obs=obs[agent.player])
                 for agent in [player_0, player_1]
             }
+            player_0_prev_available_units=np.where(obs[player_PPO]["units_mask"][player_0.team_id])[0]
             next_obs, wins, terminated, truncated, info = env.step(actions)
 
             done_0 = bool(terminated[player_PPO].item()) or bool(truncated[player_PPO].item())
@@ -122,12 +123,15 @@ def evaluate_agents(agent_1_cls,
             r1 = new_points_1 - old_points_1
 
             # Agent calculates its own internal shaping reward
-            game_rew += player_0.calculate_rewards_and_dones(next_obs[player_PPO],last_obs[player_PPO],env_cfg, r0, done_0)
+            game_rew += player_0.calculate_rewards_and_dones(next_obs[player_PPO],last_obs[player_PPO],env_cfg, r0, done_0,player_0_prev_available_units)
             
             old_points_0, old_points_1 = new_points_0, new_points_1
             obs = next_obs
+            if step in [100,200,300,400,500]:
+                player_0.update_ppo()
             step += 1
             game_done = done_0 or done_1
+
         ema_reward = beta * ema_reward + (1 - beta) * game_rew
         player_0.save_model()
 
@@ -161,10 +165,17 @@ def evaluate_agents(agent_1_cls,
             plt.show()
 
         time_finish = time.time()
-        print(f"Game {i} took {time_finish - time_start:.2f} seconds")
+        time_total=time_finish - time_start
+        print(f"Game {i} took {time_total:.2f} seconds")
+        part_times=player_0.get_track_times()
+        print(f"part_times: {part_times}")
+        for key in part_times.keys():
+            print(f"{key} took {part_times[key]:.2f} seconds")
+            print(f"{key} took {part_times[key]/time_total*100:.2f}% of total time")
+        
 
     env.close()
 
 # Run the evaluation
 if __name__ == "__main__":
-    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=10, checkpoint_interval=1)
+    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=100, checkpoint_interval=1)
