@@ -192,7 +192,7 @@ class PPO_Model(nn.Module):
                  lam=0.95,
                  eps_clip=0.15,
                  lr=1e-4,
-                 K_epochs=5,
+                 K_epochs=2,
                  update_timestep=1,
                  device=torch.device("cpu"),
                  entropy_coef=0.001,
@@ -311,7 +311,7 @@ class PPO_Model(nn.Module):
             for (unit_states_b, map_states_b, actions_b, logprobs_b,
                  advantages_b, returns_b) in self.ppo_data_loader(
                      old_unit_states, old_map_states, old_actions, old_logprobs,
-                     all_advantages, all_returns, batch_size=64):
+                     all_advantages, all_returns, batch_size=128):
 
                 # Evaluate with current policy
                 logprobs_new, state_values, dist_entropy = self.policy.evaluate(
@@ -424,10 +424,7 @@ class Agent:
         )
         # try loading existing weights
         try:
-            start_time=time.time()
             self.load_model()
-            end_time=time.time()
-            print(f"Model loaded in {end_time-start_time} seconds")
         except FileNotFoundError:
             pass
 
@@ -441,10 +438,7 @@ class Agent:
         team_points = np.array(obs["team_points"])
         
         # map update
-        start_time = time.time()
         self.play_map.update_map(obs)
-        finish_time = time.time()
-        self.track_times["update_map"]+=finish_time-start_time
         # which units can act?
         available_unit_ids = np.where(unit_mask)[0]
 
@@ -476,15 +470,12 @@ class Agent:
             return np.zeros((self.env_cfg["max_units"], 3), dtype=int)
 
         # get actions from the old policy
-        start_time = time.time()
         actions_np = self.ppo.act(
             unit_states=states_list,
             map_stack=map_data_single,
             fleet_memory=self.fleet_mem,
             unit_ids=available_unit_ids
         )
-        finish_time = time.time()
-        self.track_times["act"]+=finish_time-start_time
         # build final action array
         actions_array = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
         for i, unit_id in enumerate(available_unit_ids):
@@ -509,24 +500,87 @@ class Agent:
         self.track_times["update_ppo"]+=time_end-time_start
 
     def calculate_rewards_and_dones(self, obs, last_obs, env_cfg, new_points, done,old_available_unit_ids):
-        unit_mask = np.array(obs["units_mask"][self.team_id])
+        """unit_mask = np.array(obs["units_mask"][self.team_id])
         unit_positions = np.array(obs["units"]["position"][self.team_id])
         available_unit_ids = np.where(unit_mask)[0]
         new_visible_tiles = np.sum(np.bitwise_xor(obs["sensor_mask"], last_obs["sensor_mask"]))
-        visibility_coef=1/((env_cfg["unit_sensor_range"]*2+1)**2)
-        visible_tiles=visibility_coef*np.sum(obs["sensor_mask"])/(24*24)
-        reward=0
-        reward+=visible_tiles
-        raw_award=reward
-        """if obs['units']['energy'][self.team_id,0]>50:
-            reward+=0.05
-        else:
-            reward-=0.05"""
+        visibility_coef=1/(((env_cfg["unit_sensor_range"]*2+1)**(3/2))*(24**2))
+        visible_tiles=np.sum(obs["sensor_mask"])
+        shared_reward=0
+
+        shared_reward+=visibility_coef*visible_tiles"""
+        exploration_factor = 0.005    # per newly discovered tile
+        combat_factor = 0.2           # per enemy unit “destroyed”
+        energy_factor = 0.05          # bonus for high normalized energy
+        proximity_factor = 0.1        # bonus for being near a relic
+        movement_factor = 0.01        # bonus per Manhattan distance moved
+
+        team = self.team_id
+        opp_team = self.opp_team_id
+
+        # --- Global rewards based on observations ---
+        # (a) Exploration: count only those tiles that have become visible now.
+        new_visible = np.logical_and(obs["sensor_mask"], np.logical_not(last_obs["sensor_mask"]))
+        visible_tiles = np.sum(obs["sensor_mask"])
+        global_exploration_reward = exploration_factor * visible_tiles
+
+        # (b) Combat: count the drop in visible enemy ships.
+        enemy_count_last = np.sum(last_obs["units_mask"][opp_team])
+        enemy_count_current = np.sum(obs["units_mask"][opp_team])
+        enemy_destroyed = max(0, enemy_count_last - enemy_count_current)
+        global_combat_reward = enemy_destroyed * combat_factor
+
+        # (c) Relic: reward any increase in team relic points.
+        # new_points is assumed to be (current team_points - previous team_points)
+        global_relic_reward = new_points
+
+        # Distribute these global rewards evenly among ships that were available last step.
+        num_active = len(old_available_unit_ids)
+        per_unit_exploration = global_exploration_reward / max(1, num_active)
+        per_unit_combat = global_combat_reward / max(1, num_active)
+        per_unit_relic = global_relic_reward / max(1, num_active)
+
+        # --- Per-ship individual rewards ---
+        team_positions = np.array(obs["units"]["position"][team])
+        team_energies = np.array(obs["units"]["energy"][team])
+        last_team_positions = np.array(last_obs["units"]["position"][team])
+        
+        total_reward_sum = 0.0
+
         for unit_id in old_available_unit_ids:
-            self.fleet_mem.ships[unit_id].rewards.append(reward)
+            unit_reward = 0.0
+
+            # (1) Movement reward: if this ship was active last timestep, reward distance moved.
+            if last_obs["units_mask"][team][unit_id]:
+                prev_pos = last_team_positions[unit_id]
+                curr_pos = team_positions[unit_id]
+                move_distance = abs(curr_pos[0] - prev_pos[0]) + abs(curr_pos[1] - prev_pos[1])
+                unit_reward += movement_factor * move_distance
+
+            # (2) Energy reward: bonus proportional to current energy (normalized by 400).
+            current_energy = team_energies[unit_id]
+            unit_reward += (current_energy / 400.0) * energy_factor
+
+            # (3) Proximity to relic reward: if any relics have been discovered, reward being close.
+            if len(self.relic_node_positions) > 0:
+                # Compute Manhattan distance to each known relic and select the minimum.
+                distances = [abs(team_positions[unit_id][0] - relic[0]) + abs(team_positions[unit_id][1] - relic[1])
+                            for relic in self.relic_node_positions]
+                nearest_distance = min(distances)
+                # Reward gets larger as the distance gets smaller.
+                unit_reward += proximity_factor * (1 - (nearest_distance / 48.0))
+            
+            # (4) Add the distributed global rewards.
+            unit_reward += per_unit_exploration + per_unit_combat + per_unit_relic
+
+            # Save this reward and the terminal flag.
+            self.fleet_mem.ships[unit_id].rewards.append(unit_reward)
             self.fleet_mem.ships[unit_id].is_terminals.append(done)
-     
-        return raw_award
+
+            total_reward_sum += unit_reward
+
+        # Return (for logging purposes) the average reward over the ships
+        return total_reward_sum / max(1, num_active)
 
     def save_model(self):
         torch.save({
@@ -538,8 +592,7 @@ class Agent:
         checkpoint = torch.load('modelPPO.pth')
         self.ppo.policy.load_state_dict(checkpoint['policy'])
         self.ppo.optimizer.load_state_dict(checkpoint['optimizer'])
-        print("Loaded PPO model from disk!")
     def clear_track_times(self):
-        self.track_times={"update_map":0,"act":0,"update_ppo":0}
+        self.track_times={"update_ppo":0}
     def get_track_times(self):
         return self.track_times

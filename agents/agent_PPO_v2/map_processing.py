@@ -10,10 +10,13 @@ class Playing_Map():
         self.map_map=torch.zeros((map_size,map_size,map_channels))
         self.unit_map=torch.zeros((map_size,map_size,unit_channels))
         self.relic_map=torch.zeros((map_size,map_size,relic_channels))
-    def add_relic(self,pos):
-        x,y=pos
-        self.relic_map[max(0,x-2):min(23,x+2),max(0,y-2):min(23,y+2),0]=1
-        self.relic_map[x,y,2]=1
+    def add_relic(self, pos):
+        x, y = pos
+        # Use self.size instead of hardcoded numbers so that we cover a 5x5 area properly.
+        self.relic_map[max(0, x - 2):min(self.size, x + 3),
+                        max(0, y - 2):min(self.size, y + 3), 0] = 1
+        self.relic_map[x, y, 2] = 1
+
     def locate_new_reward_source(self,obs,last_obs):
         unit_us=obs["units"]["position"][self.player_id]
         unit_mask_us=obs["units_mask"][self.player_id]
@@ -33,7 +36,7 @@ class Playing_Map():
         #Update map
         rows, cols = torch.where(visibility)
         self.map_map[rows, cols,1:4] = torch.nn.functional.one_hot(torch.from_numpy(obs['map_features']['tile_type'])[visibility].long(), num_classes=3).float()
-        self.map_map[:,:,0]-visibility.int()
+        self.map_map[:,:,0]=visibility.int()
         #Update units
         unit_us=obs["units"]["position"][self.player_id]
         unit_mask_us=obs["units_mask"][self.player_id]

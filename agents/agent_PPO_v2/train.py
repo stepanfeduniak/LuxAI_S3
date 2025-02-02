@@ -26,7 +26,7 @@ def graph_data(gamerewards, ema_rewards):
     plt.show()
 # Directory where logs are stored
 CHECKPOINT_DIR = "./training_logs"
-beta=0.9
+beta=0.95
 def save_checkpoint(file_path, data):
     """Saves training logs to JSON file."""
     with open(file_path, 'w') as f:
@@ -80,7 +80,7 @@ def evaluate_agents(agent_1_cls,
     ema_reward = ema_rewards[-1] if len(ema_rewards) > 0 else 0
     # Resume from where we left off if logs exist
     start_game_idx = len(gamerewards)
-    #graph_data(gamerewards,ema_rewards)
+    graph_data(gamerewards,ema_rewards)
     for i in range(start_game_idx, games_to_play):
         if i%2==0:
             player_PPO="player_0"
@@ -127,11 +127,11 @@ def evaluate_agents(agent_1_cls,
             
             old_points_0, old_points_1 = new_points_0, new_points_1
             obs = next_obs
-            if step in [100,200,300,400,500]:
+            if obs[player_PPO]["match_steps"]==100:
                 player_0.update_ppo()
             step += 1
             game_done = done_0 or done_1
-
+        #player_0.update_ppo()
         ema_reward = beta * ema_reward + (1 - beta) * game_rew
         player_0.save_model()
 
@@ -149,7 +149,7 @@ def evaluate_agents(agent_1_cls,
             save_checkpoint(reward_log_path, reward_log_data)
 
         # Visualization at key points (optional)
-        if i in [1, 10, 50, 100,200, 500, games_to_play - 1]:
+        if i in [1, 10, games_to_play - 1]:
             clear_output(wait=True)
 
             plt.figure(figsize=(10, 4))
@@ -168,14 +168,15 @@ def evaluate_agents(agent_1_cls,
         time_total=time_finish - time_start
         print(f"Game {i} took {time_total:.2f} seconds")
         part_times=player_0.get_track_times()
-        print(f"part_times: {part_times}")
+        #print(f"part_times: {part_times}")
         for key in part_times.keys():
-            print(f"{key} took {part_times[key]:.2f} seconds")
             print(f"{key} took {part_times[key]/time_total*100:.2f}% of total time")
+        #print(f"Game {i} reward: {game_rew}")
+        #print(f"Unit visibility range:{ env_cfg["unit_sensor_range"]}")
         
 
     env.close()
 
 # Run the evaluation
 if __name__ == "__main__":
-    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=100, checkpoint_interval=1)
+    evaluate_agents(Agent, Agent_0, replay=False, games_to_play=10000, checkpoint_interval=1)
