@@ -227,11 +227,10 @@ class PPO_Model(nn.Module):
         rewards = trajectory['rewards']
         values = trajectory['values']
         dones = trajectory['is_terminals']
-        #print(f"length of rewards: {len(rewards)}, values: {len(values)}, dones: {len(dones)}")
 
-        # convert values to python floats
+        # Convert values to floats
         values = [v.item() if isinstance(v, torch.Tensor) else v for v in values]
-        values.append(trajectory["next_value"])  # bootstrap at the end
+        values.append(trajectory["next_value"])  # bootstrap value
 
         advantages = []
         gae = 0.0
@@ -242,33 +241,35 @@ class PPO_Model(nn.Module):
             advantages.insert(0, gae)
 
         advantages = torch.FloatTensor(advantages).to(self.device)
-        # optional normalization
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Use unbiased=False to avoid NaN when tensor has one element
+        advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
         returns = advantages + torch.FloatTensor(values[:-1]).to(self.device)
         return advantages, returns
+
     
-    def get_trajectories(self, fleet_memory):
+    def get_trajectories(self, total_fleet_memory):
         trajectories = []
-        for ship in fleet_memory.ships:
-            # fix: was "if len(ship.states) > 0:", should check "unit_states"
-            if len(ship.unit_states) > 0:
-                trajectory = {
-                    'unit_states': torch.stack(ship.unit_states).to(ship.device),
-                    'map_states': torch.stack(ship.map_states).to(ship.device),
-                    'actions': torch.stack(ship.actions).to(ship.device),
-                    'logprobs': torch.stack(ship.logprobs).to(ship.device),
-                    'rewards': torch.tensor(ship.rewards).to(ship.device),
-                    'is_terminals': torch.tensor(ship.is_terminals).to(ship.device),
-                    'values': torch.stack(ship.values).to(ship.device),  # ensure shape
-                    'next_value': ship.next_value
-                }
-                # compute advantages
-                #print(f"Computing GAE for ship {ship.ship_id}")
-                #print(f"length of actions: {len(trajectory['actions'])}, logprobs: {len(trajectory['logprobs'])}, rewards: {len(trajectory['rewards'])},values: {len(trajectory['values'])}, is_terminals: {len(trajectory['is_terminals'])}")
-                advantages, returns = self.compute_gae(trajectory)
-                trajectory['advantages'] = advantages
-                trajectory['returns'] = returns
-                trajectories.append(trajectory)
+        for fleet_memory in total_fleet_memory:
+            for ship in fleet_memory.ships:
+                # fix: was "if len(ship.states) > 0:", should check "unit_states"
+                if len(ship.unit_states) > 0:
+                    trajectory = {
+                        'unit_states': torch.stack(ship.unit_states).to(ship.device),
+                        'map_states': torch.stack(ship.map_states).to(ship.device),
+                        'actions': torch.stack(ship.actions).to(ship.device),
+                        'logprobs': torch.stack(ship.logprobs).to(ship.device),
+                        'rewards': torch.tensor(ship.rewards).to(ship.device),
+                        'is_terminals': torch.tensor(ship.is_terminals).to(ship.device),
+                        'values': torch.stack(ship.values).to(ship.device),  # ensure shape
+                        'next_value': ship.next_value
+                    }
+                    # compute advantages
+                    #print(f"Computing GAE for ship {ship.ship_id}")
+                    #print(f"length of actions: {len(trajectory['actions'])}, logprobs: {len(trajectory['logprobs'])}, rewards: {len(trajectory['rewards'])},values: {len(trajectory['values'])}, is_terminals: {len(trajectory['is_terminals'])}")
+                    advantages, returns = self.compute_gae(trajectory)
+                    trajectory['advantages'] = advantages
+                    trajectory['returns'] = returns
+                    trajectories.append(trajectory)
         #print(f"Collected {len(trajectories)} trajectories")
         return trajectories
     
@@ -283,6 +284,7 @@ class PPO_Model(nn.Module):
         logprobs = torch.cat([traj['logprobs'] for traj in trajectories], dim=0)
         advantages = torch.cat([traj['advantages'] for traj in trajectories], dim=0)
         returns = torch.cat([traj['returns'] for traj in trajectories], dim=0)
+        print(returns.shape)
         return unit_states, map_states, actions, logprobs, advantages, returns
     
     @staticmethod
@@ -482,20 +484,22 @@ class Agent:
             actions_array[unit_id, 0] = actions_np[i]
             actions_array[unit_id, 1] = 0
             actions_array[unit_id, 2] = 0
-
-        # Example: periodically update PPO
         
             
 
 
         return actions_array
-    def update_ppo(self):
-        #print("Updating PPO model...")
-        time_start = time.time()
+    def return_memories(self):
         for ship in self.fleet_mem.ships:
             ship.next_value = 0.0
-        self.ppo.update(self.fleet_mem)
-        self.fleet_mem.clear_memory()
+        return self.fleet_mem
+    def clear_memories(self):
+        self.fleet_mem= FleetMemory(self.env_cfg["max_units"], device=self.device)
+
+    def update_ppo(self,total_memory):
+        #print("Updating PPO model...")
+        time_start = time.time()
+        self.ppo.update(total_memory)
         time_end = time.time()
         self.track_times["update_ppo"]+=time_end-time_start
 

@@ -81,6 +81,7 @@ def evaluate_agents(agent_1_cls,
     # Resume from where we left off if logs exist
     start_game_idx = len(gamerewards)
     graph_data(gamerewards,ema_rewards)
+    all_fleet_memories=[]
     for i in range(start_game_idx, games_to_play):
         if i%2==0:
             player_PPO="player_0"
@@ -128,11 +129,18 @@ def evaluate_agents(agent_1_cls,
             old_points_0, old_points_1 = new_points_0, new_points_1
             obs = next_obs
             if obs[player_PPO]["match_steps"]==100:
-                player_0.update_ppo()
+                all_fleet_memories.append(player_0.return_memories())
+                player_0.clear_memories()
             step += 1
             game_done = done_0 or done_1
         #player_0.update_ppo()
         ema_reward = beta * ema_reward + (1 - beta) * game_rew
+
+        if i%5==1 and len(all_fleet_memories)>0:
+            player_0.update_ppo(all_fleet_memories)
+            all_fleet_memories=[]
+            
+
         player_0.save_model()
 
         # Log the final reward for this game
