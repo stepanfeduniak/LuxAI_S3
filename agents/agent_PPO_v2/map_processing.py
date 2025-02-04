@@ -1,6 +1,6 @@
 import torch
 class Playing_Map():
-    def __init__(self,player_id,map_size,unit_channels=2,map_channels=4,relic_channels=3):
+    def __init__(self,player_id,map_size,unit_channels=2,map_channels=5,relic_channels=3):
         self.player_id=player_id
         self.size=map_size
         self.map_channels=map_channels #
@@ -27,16 +27,20 @@ class Playing_Map():
         musk = self.relic_map[valid_positions_us[0], valid_positions_us[1], 0] > 0
 
         # 2) Use this mask to index into relic_map and do the in-place add
-        self.relic_map[valid_positions_us[0][musk], valid_positions_us[1][musk], 0] += 0.5 * (actual_reward - expected_reward)
+        try:
+            self.relic_map[valid_positions_us[0][musk], valid_positions_us[1][musk], 0] += 0.5 * (actual_reward - expected_reward)
+        except:
+            print(valid_positions_us)
 
         
-    def update_map(self,obs):
+    def update_map(self,obs,last_obs=None):
         #Visibility, right now
         visibility=torch.from_numpy(obs["sensor_mask"])
         #Update map
         rows, cols = torch.where(visibility)
         self.map_map[rows, cols,1:4] = torch.nn.functional.one_hot(torch.from_numpy(obs['map_features']['tile_type'])[visibility].long(), num_classes=3).float()
         self.map_map[:,:,0]=visibility.int()
+        self.map_map[rows,cols,4]= torch.from_numpy(obs['map_features']['tile_type'])[visibility].float()
         #Update units
         unit_us=obs["units"]["position"][self.player_id]
         unit_mask_us=obs["units_mask"][self.player_id]
@@ -44,18 +48,32 @@ class Playing_Map():
         values_us = torch.ones(valid_positions_us.shape[1], dtype=torch.float32)
         self.unit_map[:,:,0]=0
         self.unit_map[:,:,1]/=2
-        self.unit_map[:,:,0].index_put_((torch.tensor(valid_positions_us[0], dtype=torch.long), torch.tensor(valid_positions_us[1], dtype=torch.long)),torch.tensor(values_us, dtype=torch.float32),accumulate=True)
+        self.unit_map[:,:,0].index_put_(
+                    (torch.as_tensor(valid_positions_us[0], dtype=torch.long),
+                    torch.as_tensor(valid_positions_us[1], dtype=torch.long)),
+                    torch.as_tensor(values_us, dtype=torch.float32),
+                    accumulate=True
+)
 
         unit_mask_them=obs["units_mask"][1-self.player_id]
         unit_them=obs["units"]["position"][1-self.player_id]
         valid_positions_them = unit_them[unit_mask_them].T
         values_them = torch.ones(valid_positions_them.shape[1], dtype=torch.float32)
-        self.unit_map[:,:,1].index_put_((torch.tensor(valid_positions_them[0], dtype=torch.long), torch.tensor(valid_positions_them[1], dtype=torch.long)),torch.tensor(values_them, dtype=torch.float32),accumulate=True)
-        #Update relics
-        relics=obs["relic_nodes"]
-        relics_mask=obs["relic_nodes_mask"]
-        relics_pos = relics[relics_mask].T
-        self.relic_map[relics_pos[0],relics_pos[1],0]=1
+        self.unit_map[:,:,1].index_put_(
+                (torch.as_tensor(valid_positions_them[0], dtype=torch.long),
+                torch.as_tensor(valid_positions_them[1], dtype=torch.long)),
+                torch.as_tensor(values_them, dtype=torch.float32),
+                accumulate=True
+)
+        relics = obs["relic_nodes"]
+        relics_mask = obs["relic_nodes_mask"]
+        relics_pos = relics[relics_mask].T  # shape: [2, N]
+        for x, y in zip(relics_pos[0].tolist(), relics_pos[1].tolist()):
+            self.add_relic((x, y))
+        
+        # If a previous observation is provided, adjust the relic map to add new reward sources.
+        if last_obs is not None:
+            self.locate_new_reward_source(obs, last_obs)
 
 
 

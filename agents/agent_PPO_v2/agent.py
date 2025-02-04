@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import time
-from lux.utils import direction_to
 from map_processing import Playing_Map
 
 
@@ -47,29 +46,153 @@ class FleetMemory:
         for ship in self.ships:
             ship.clear_memory()
 
-
-class MapEncoder(nn.Module):
-    def __init__(self, in_channels, out_dim=64):
+class SqueezeAndExcitation(nn.Module):
+    """
+    Standard Squeeze-and-Excitation block:
+      1. Global avg-pool over H,W
+      2. Bottleneck MLP
+      3. Channel-wise sigmoid gating
+    """
+    def __init__(self, channels, reduction=16):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 24, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Flatten(),
-        )
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
-            nn.Linear(24 * 24 * 24, 128),
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.GELU(),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        y = self.avgpool(x).view(b, c)     # shape [B, C]
+        y = self.fc(y).view(b, c, 1, 1)    # shape [B, C, 1, 1]
+        return x * y                       # scale each channel
+
+class ResBlock(nn.Module):
+    """
+    A ResBlock with:
+      - Conv(3×3, out=128), GELU
+      - Conv(3×3, out=128)
+      - Squeeze-and-Excitation
+      - Skip connection
+    """
+    def __init__(self, channels=128):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.activation = nn.GELU()
+        self.se = SqueezeAndExcitation(channels, reduction=16)
+
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.activation(out)
+        out = self.conv2(out)
+        out = self.se(out)
+        return out + residual
+
+class DoubleConeBlock(nn.Module):
+    """
+    The 'double cone' in the diagram:
+      1. Downsample with conv(4×4, stride=4), GELU
+      2. ResBlock × 6
+      3. Upsample with convTranspose(3×3, stride=2) × 2
+      4. Skip connection from block input -> final output
+    """
+    def __init__(self, channels=128, num_resblocks=6):
+        super().__init__()
+        self.down = nn.Conv2d(channels, channels, kernel_size=4, stride=4)
+        self.down_act = nn.GELU()
+
+        self.mid_blocks = nn.Sequential(
+            *[ResBlock(channels) for _ in range(num_resblocks)]
+        )
+
+        # Two successive upsampling by factor of 2 => overall up by 4
+        self.up1 = nn.ConvTranspose2d(channels, channels, kernel_size=3, 
+                                      stride=2, padding=1, output_padding=1)
+        self.up_act1 = nn.GELU()
+        self.up2 = nn.ConvTranspose2d(channels, channels, kernel_size=3, 
+                                      stride=2, padding=1, output_padding=1)
+        self.up_act2 = nn.GELU()
+
+    def forward(self, x):
+        skip = x
+        x = self.down_act(self.down(x))
+        x = self.mid_blocks(x)
+
+        x = self.up_act1(self.up1(x))
+        x = self.up_act2(self.up2(x))
+
+        # Skip connection from the input of this block
+        return x + skip
+class MapEncoder(nn.Module):
+    """
+    Modified "double cone" encoder that outputs a single feature vector
+    of size out_dim, instead of separate critic and actor heads.
+    """
+    def __init__(
+        self, 
+        in_channels=10, 
+        hidden_dim=64, 
+        out_dim=64, 
+        num_res_pre=4, 
+        num_res_mid=6, 
+        num_res_post=3
+    ):
+        super().__init__()
+
+        # 1) Initial conv => hidden_dim channels
+        self.initial_conv = nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1)
+        self.initial_act = nn.GELU()
+
+        # 2) Pre-cone ResBlocks
+        self.resblocks_pre = nn.Sequential(
+            *[ResBlock(hidden_dim) for _ in range(num_res_pre)]
+        )
+
+        # 3) The DoubleConeBlock
+        self.double_cone = DoubleConeBlock(channels=hidden_dim, num_resblocks=num_res_mid)
+
+        # 4) Post-cone ResBlocks
+        self.resblocks_post = nn.Sequential(
+            *[ResBlock(hidden_dim) for _ in range(num_res_post)]
+        )
+
+        # 5) Final MLP to produce out_dim (just like old MapEncoder did)
+        #    We'll do: [global avg pool -> linear -> ReLU -> linear -> ReLU]
+        #    Adjust however you prefer.
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
             nn.ReLU(),
             nn.Linear(128, out_dim),
             nn.ReLU()
         )
-        
+
     def forward(self, x):
-        # x shape: [batch_size, in_channels, H, W]
-        x = self.conv(x)
-        x = self.fc(x)
-        return x  # [batch_size, out_dim]
+        """
+        x is expected to have shape [B, in_channels, H, W].
+        For example, [B, 105, 48, 48] if you follow the diagram exactly.
+        """
+        # 1) initial conv
+        x = self.initial_conv(x)
+        x = self.initial_act(x)
+
+        # 2) pre-cone resblocks
+        x = self.resblocks_pre(x)
+
+        # 3) double cone
+        x = self.double_cone(x)
+
+        # 4) post-cone resblocks
+        x = self.resblocks_post(x)
+
+        # 5) global average pool => MLP => [B, out_dim]
+        x = x.mean(dim=[2, 3])  # shape => [B, hidden_dim]
+        x = self.head(x)        # => [B, out_dim]
+
+        return x # [batch_size, out_dim]
 
 
 class UnitEncoder(nn.Module):
@@ -77,9 +200,11 @@ class UnitEncoder(nn.Module):
         super().__init__()
         self.fc = nn.Sequential(
             nn.Linear(in_dim, 128),
-            nn.ReLU(),
+            nn.GELU(),
+            nn.Linear(128, 128),
+            nn.GELU(),
             nn.Linear(128, out_dim),
-            nn.ReLU()
+            nn.GELU()
         )
         
     def forward(self, x):
@@ -92,9 +217,11 @@ class Actor(nn.Module):
         super().__init__()
         self.unit_enc = UnitEncoder(in_dim=unit_feature_dim, out_dim=64)
         self.policy_head = nn.Sequential(
-            nn.Linear(map_encoding_dim + 64, 64),
-            nn.ReLU(),
-            nn.Linear(64, n_actions),
+            nn.Linear(map_encoding_dim + 64, 128),
+            nn.GELU(),
+            nn.Linear(128, 128),
+            nn.GELU(),
+            nn.Linear(128, n_actions),
             nn.Softmax(dim=-1)
         )
 
@@ -189,9 +316,9 @@ class PPO_Model(nn.Module):
                  unit_feature_dim,
                  action_dim,
                  gamma=0.95,
-                 lam=0.95,
+                 lam=0.5,
                  eps_clip=0.15,
-                 lr=1e-4,
+                 lr=5e-5,
                  K_epochs=2,
                  update_timestep=1,
                  device=torch.device("cpu"),
@@ -284,7 +411,7 @@ class PPO_Model(nn.Module):
         logprobs = torch.cat([traj['logprobs'] for traj in trajectories], dim=0)
         advantages = torch.cat([traj['advantages'] for traj in trajectories], dim=0)
         returns = torch.cat([traj['returns'] for traj in trajectories], dim=0)
-        print(returns.shape)
+        print(f"Total samples for training:{returns.shape[0]}")
         return unit_states, map_states, actions, logprobs, advantages, returns
     
     @staticmethod
@@ -309,12 +436,11 @@ class PPO_Model(nn.Module):
          old_actions, old_logprobs,
          all_advantages, all_returns) = self.trajectories_to_train_data(trajectories)
 
-        for _ in range(self.K_epochs):
+        for q in range(self.K_epochs):
             for (unit_states_b, map_states_b, actions_b, logprobs_b,
                  advantages_b, returns_b) in self.ppo_data_loader(
                      old_unit_states, old_map_states, old_actions, old_logprobs,
-                     all_advantages, all_returns, batch_size=128):
-
+                     all_advantages, all_returns, batch_size=256):
                 # Evaluate with current policy
                 logprobs_new, state_values, dist_entropy = self.policy.evaluate(
                     unit_states_b, map_states_b, actions_b
@@ -375,13 +501,18 @@ class PPO_Model(nn.Module):
         return actions_np
 
 
-def get_state(unit_pos, nearest_relic_node_position, unit_energy):
+def get_state(unit_pos, nearest_relic_node_position, unit_energy,env_cfg):
     return [
         unit_pos[0] / 11.5 - 1,
         unit_pos[1] / 11.5 - 1,
         nearest_relic_node_position[0] / 11.5 - 1,
         nearest_relic_node_position[1] / 11.5 - 1,
-        unit_energy / 200 - 1
+        unit_energy / 200 - 1,
+        env_cfg['unit_sensor_range']/5,
+        env_cfg['unit_move_cost']/10,
+        env_cfg['unit_sap_cost']/50,
+        env_cfg['unit_sap_range']/5,
+        
     ]
 
 
@@ -397,9 +528,10 @@ class Agent:
         self.opp_team_id = 1 - self.team_id
         self.env_cfg = env_cfg
 
-        self.state_dim = 5
+        self.state_dim = 5+4 #unit_sensor_range+unit_move_cost+unit_sap_cost+unit_sap_range
         self.action_dim = 5  # 5 discrete actions
-        self.device = torch.device("cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         
         self.relic_node_positions = []
         self.discovered_relic_nodes_ids = set()
@@ -413,13 +545,13 @@ class Agent:
             player_id=self.team_id, 
             map_size=env_cfg["map_width"],
             unit_channels=2,
-            map_channels=4,
+            map_channels=5,
             relic_channels=3
         )
 
         # PPO model
         self.ppo = PPO_Model(
-            map_channels_input=9,
+            map_channels_input=10,
             unit_feature_dim=self.state_dim,
             action_dim=self.action_dim,
             device=self.device
@@ -440,7 +572,7 @@ class Agent:
         team_points = np.array(obs["team_points"])
         
         # map update
-        self.play_map.update_map(obs)
+        #self.play_map.update_map(obs)
         # which units can act?
         available_unit_ids = np.where(unit_mask)[0]
 
@@ -462,10 +594,10 @@ class Agent:
             unit_pos = unit_positions[unit_id]
             unit_energy = unit_energys[unit_id]
             if len(self.relic_node_positions) > 0:
-                nrp = self.relic_node_positions[0]  # just pick first for now
+                nrp = min(self.relic_node_positions, key=lambda pos: manhattan_distance(unit_pos, pos))
             else:
-                nrp = np.array([0,0])
-            st = get_state(unit_pos, nrp, unit_energy)
+                nrp = np.array([13,13])
+            st = get_state(unit_pos, nrp, unit_energy,self.env_cfg)
             states_list.append(st)
 
         if len(available_unit_ids) == 0:
@@ -491,7 +623,7 @@ class Agent:
         return actions_array
     def return_memories(self):
         for ship in self.fleet_mem.ships:
-            ship.next_value = 0.0
+            ship.next_value = ship.values[-1]
         return self.fleet_mem
     def clear_memories(self):
         self.fleet_mem= FleetMemory(self.env_cfg["max_units"], device=self.device)
@@ -503,30 +635,34 @@ class Agent:
         time_end = time.time()
         self.track_times["update_ppo"]+=time_end-time_start
 
-    def calculate_rewards_and_dones(self, obs, last_obs, env_cfg, new_points, done,old_available_unit_ids):
-        """unit_mask = np.array(obs["units_mask"][self.team_id])
-        unit_positions = np.array(obs["units"]["position"][self.team_id])
-        available_unit_ids = np.where(unit_mask)[0]
-        new_visible_tiles = np.sum(np.bitwise_xor(obs["sensor_mask"], last_obs["sensor_mask"]))
-        visibility_coef=1/(((env_cfg["unit_sensor_range"]*2+1)**(3/2))*(24**2))
-        visible_tiles=np.sum(obs["sensor_mask"])
-        shared_reward=0
-
-        shared_reward+=visibility_coef*visible_tiles"""
-        exploration_factor = 0.005    # per newly discovered tile
-        combat_factor = 0.2           # per enemy unit “destroyed”
-        energy_factor = 0.05          # bonus for high normalized energy
-        proximity_factor = 0.1        # bonus for being near a relic
-        movement_factor = 0.01        # bonus per Manhattan distance moved
-
+    def calculate_rewards_and_dones(self, obs, last_obs, env_cfg, new_points, done, old_available_unit_ids):
+        # Reward factors
         team = self.team_id
+        exploration_factor = 0.02    # per newly discovered tile
+        combat_factor = 0.2          # per enemy unit “destroyed”
+        energy_factor = 0.018         # bonus for high normalized energy
+        proximity_factor = 0.008       # bonus for being near a relic
+        movement_factor = 0.002       # bonus per Manhattan distance moved
+        dist_from_origin=0.02
+        if team==0:
+            origin_pos=[0,0]
+        else:
+            origin_pos=[23,23]
+        if len(self.relic_node_positions)>0:
+            if team ==0:
+                relic_factor = 0.5 /(24-manhattan_distance(self.relic_node_positions[0],[0,0]))**(0.5)
+            else:
+                relic_factor = 0.5 /(24-manhattan_distance(self.relic_node_positions[0],[23,23]))**(0.5)
+        else:
+            relic_factor=0.5
+        visibility_coef = 1 / ((env_cfg["unit_sensor_range"] * 2 + 1) ** (3 / 2))
+        
         opp_team = self.opp_team_id
 
         # --- Global rewards based on observations ---
-        # (a) Exploration: count only those tiles that have become visible now.
-        new_visible = np.logical_and(obs["sensor_mask"], np.logical_not(last_obs["sensor_mask"]))
+        # (a) Exploration: count the number of tiles that are visible.
         visible_tiles = np.sum(obs["sensor_mask"])
-        global_exploration_reward = exploration_factor * visible_tiles
+        global_exploration_reward = exploration_factor * visible_tiles * visibility_coef
 
         # (b) Combat: count the drop in visible enemy ships.
         enemy_count_last = np.sum(last_obs["units_mask"][opp_team])
@@ -535,56 +671,96 @@ class Agent:
         global_combat_reward = enemy_destroyed * combat_factor
 
         # (c) Relic: reward any increase in team relic points.
-        # new_points is assumed to be (current team_points - previous team_points)
-        global_relic_reward = new_points
+        global_relic_reward = max(0,new_points)*relic_factor
 
-        # Distribute these global rewards evenly among ships that were available last step.
+        # Distribute these global rewards evenly among active units.
         num_active = len(old_available_unit_ids)
         per_unit_exploration = global_exploration_reward / max(1, num_active)
         per_unit_combat = global_combat_reward / max(1, num_active)
         per_unit_relic = global_relic_reward / max(1, num_active)
 
-        # --- Per-ship individual rewards ---
+        # Prepare to accumulate reward breakdowns (summing contributions from all units).
+        total_breakdown = {
+            "movement": 0.0,
+            "energy": 0.0,
+            "proximity": 0.0,
+            "exploration": 0.0,
+            "combat": 0.0,
+            "relic": 0.0
+        }
+        total_reward_sum = 0.0
+        
         team_positions = np.array(obs["units"]["position"][team])
         team_energies = np.array(obs["units"]["energy"][team])
         last_team_positions = np.array(last_obs["units"]["position"][team])
         
-        total_reward_sum = 0.0
-
+        # Process each unit that was active in the last timestep.
         for unit_id in old_available_unit_ids:
-            unit_reward = 0.0
-
-            # (1) Movement reward: if this ship was active last timestep, reward distance moved.
+            unit_breakdown = {
+                "movement": 0.0,
+                "energy": 0.0,
+                "proximity": 0.0,
+                "exploration": per_unit_exploration,  # global reward portion
+                "combat": per_unit_combat,
+                "relic": per_unit_relic
+            }
+            
+            # (1) Movement reward: reward based on Manhattan distance moved.
             if last_obs["units_mask"][team][unit_id]:
                 prev_pos = last_team_positions[unit_id]
                 curr_pos = team_positions[unit_id]
-                move_distance = abs(curr_pos[0] - prev_pos[0]) + abs(curr_pos[1] - prev_pos[1])
-                unit_reward += movement_factor * move_distance
-
+                move_distance = manhattan_distance(origin_pos,curr_pos)
+                if manhattan_distance(prev_pos,origin_pos)<manhattan_distance(origin_pos,curr_pos):
+                    dist_from_origin_bonus=1
+                else:
+                    dist_from_origin_bonus=0
+                unit_breakdown["movement"] = movement_factor * move_distance+dist_from_origin_bonus*dist_from_origin
+                
+                    
+            
             # (2) Energy reward: bonus proportional to current energy (normalized by 400).
             current_energy = team_energies[unit_id]
-            unit_reward += (current_energy / 400.0) * energy_factor
+            unit_breakdown["energy"] = (current_energy / 400.0) * energy_factor
 
-            # (3) Proximity to relic reward: if any relics have been discovered, reward being close.
+            # (3) Proximity reward: if relics are known, reward being close.
             if len(self.relic_node_positions) > 0:
-                # Compute Manhattan distance to each known relic and select the minimum.
-                distances = [abs(team_positions[unit_id][0] - relic[0]) + abs(team_positions[unit_id][1] - relic[1])
-                            for relic in self.relic_node_positions]
+                distances = [
+                    abs(team_positions[unit_id][0] - relic[0]) + abs(team_positions[unit_id][1] - relic[1])
+                    for relic in self.relic_node_positions
+                ]
                 nearest_distance = min(distances)
-                # Reward gets larger as the distance gets smaller.
-                unit_reward += proximity_factor * (1 - (nearest_distance / 48.0))
-            
-            # (4) Add the distributed global rewards.
-            unit_reward += per_unit_exploration + per_unit_combat + per_unit_relic
+                if nearest_distance<=7:
+                    unit_breakdown["proximity"] = proximity_factor * (1 - (nearest_distance / 48.0))
+                else:
+                    unit_breakdown["proximity"] = proximity_factor * (1 - (nearest_distance / 48.0))*0.05
+            else:
+                unit_breakdown["proximity"] = 0.0
 
-            # Save this reward and the terminal flag.
-            self.fleet_mem.ships[unit_id].rewards.append(unit_reward)
+            # Total reward for this unit is the sum of all contributions.
+            unit_total_reward = sum(unit_breakdown.values())
+            total_reward_sum += unit_total_reward
+
+            # Save the individual reward breakdown for logging (if desired).
+            # For example, you might save unit_breakdown in a separate structure for per-unit analysis.
+            # Here we simply accumulate into total_breakdown.
+            for key in total_breakdown:
+                total_breakdown[key] += unit_breakdown[key]
+
+            # Record the reward and terminal flag for the unit.
+            self.fleet_mem.ships[unit_id].rewards.append(unit_total_reward)
             self.fleet_mem.ships[unit_id].is_terminals.append(done)
 
-            total_reward_sum += unit_reward
+        # Optionally, print (or log) the percentage breakdown if there was any reward.
+        """if per_unit_relic>0:
+            if total_reward_sum > 0:
+                percent_breakdown = {k: (v / total_reward_sum) * 100 for k, v in total_breakdown.items()}
+                print(f"Step:{obs["steps"]} Reward Breakdown (%):", percent_breakdown)
+            else:
+                print("No reward allocated this step.")"""
 
-        # Return (for logging purposes) the average reward over the ships
-        return total_reward_sum / max(1, num_active)
+        # Return the average reward over active units.
+        return total_reward_sum / max(1, num_active), total_breakdown
+
 
     def save_model(self):
         torch.save({
@@ -593,7 +769,7 @@ class Agent:
         }, 'modelPPO.pth')
 
     def load_model(self):
-        checkpoint = torch.load('modelPPO.pth')
+        checkpoint = torch.load('modelPPO.pth', weights_only=True)
         self.ppo.policy.load_state_dict(checkpoint['policy'])
         self.ppo.optimizer.load_state_dict(checkpoint['optimizer'])
     def clear_track_times(self):
