@@ -91,6 +91,7 @@ def evaluate_agents(agent_1_cls,
         
         #game setup
         next_obs, info = env.reset()
+        zero_obs= next_obs
         env_cfg = info["params"]
 
         last_obs=next_obs
@@ -134,7 +135,7 @@ def evaluate_agents(agent_1_cls,
             new_reward, total_breakdown= player_0.calculate_rewards_and_dones(next_obs[player_PPO],last_obs[player_PPO],env_cfg, r0, done_0,player_0_prev_available_units)
             _,_ = player_1.calculate_rewards_and_dones(next_obs[player_baseline],last_obs[player_baseline],env_cfg, r1, done_1,player_1_prev_available_units)
             game_rew += new_reward
-            for key in game_breakdown:
+            for key in total_breakdown:
                 game_breakdown[key] += total_breakdown[key]
                 
             old_points_0, old_points_1 = new_points_0, new_points_1
@@ -142,6 +143,7 @@ def evaluate_agents(agent_1_cls,
             if next_obs[player_PPO]["match_steps"]==100:
                 all_fleet_memories.append(player_0.return_memories())
                 player_0.clear_memories()
+                
             if next_obs[player_baseline]["match_steps"]==100:
                 all_fleet_memories.append(player_1.return_memories())
                 player_1.clear_memories()
@@ -203,4 +205,4 @@ def evaluate_agents(agent_1_cls,
 
 # Run the evaluation
 if __name__ == "__main__":
-    evaluate_agents(Agent, Agent, replay=False, games_to_play=10000, checkpoint_interval=1)
+    evaluate_agents(Agent, Agent, replay=True, games_to_play=10000, checkpoint_interval=1)

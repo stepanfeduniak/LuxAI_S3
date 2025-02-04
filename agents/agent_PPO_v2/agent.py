@@ -318,8 +318,8 @@ class PPO_Model(nn.Module):
                  gamma=0.95,
                  lam=0.5,
                  eps_clip=0.15,
-                 lr=5e-5,
-                 K_epochs=2,
+                 lr=1e-4,
+                 K_epochs=4,
                  update_timestep=1,
                  device=torch.device("cpu"),
                  entropy_coef=0.001,
@@ -636,130 +636,67 @@ class Agent:
         self.track_times["update_ppo"]+=time_end-time_start
 
     def calculate_rewards_and_dones(self, obs, last_obs, env_cfg, new_points, done, old_available_unit_ids):
-        # Reward factors
+        gamma=self.ppo.gamma
+        #Exploration oriented reward:
         team = self.team_id
-        exploration_factor = 0.02    # per newly discovered tile
-        combat_factor = 0.2          # per enemy unit “destroyed”
-        energy_factor = 0.018         # bonus for high normalized energy
-        proximity_factor = 0.008       # bonus for being near a relic
-        movement_factor = 0.002       # bonus per Manhattan distance moved
-        dist_from_origin=0.02
+        exploration_factor = 0.11
+        energy_factor = 0.005
+        movement_factor =  0.2      # bonus per Manhattan distance moved
+        
+        dist_from_origin=0.02       
         if team==0:
             origin_pos=[0,0]
         else:
             origin_pos=[23,23]
-        if len(self.relic_node_positions)>0:
-            if team ==0:
-                relic_factor = 0.5 /(24-manhattan_distance(self.relic_node_positions[0],[0,0]))**(0.5)
-            else:
-                relic_factor = 0.5 /(24-manhattan_distance(self.relic_node_positions[0],[23,23]))**(0.5)
-        else:
-            relic_factor=0.5
-        visibility_coef = 1 / ((env_cfg["unit_sensor_range"] * 2 + 1) ** (3 / 2))
-        
-        opp_team = self.opp_team_id
 
-        # --- Global rewards based on observations ---
-        # (a) Exploration: count the number of tiles that are visible.
+        #goal reward     
+        visibility_coef = 1 / ((env_cfg["unit_sensor_range"] * 2 + 1) ** (2.2 / 2))
         visible_tiles = np.sum(obs["sensor_mask"])
         global_exploration_reward = exploration_factor * visible_tiles * visibility_coef
-
-        # (b) Combat: count the drop in visible enemy ships.
-        enemy_count_last = np.sum(last_obs["units_mask"][opp_team])
-        enemy_count_current = np.sum(obs["units_mask"][opp_team])
-        enemy_destroyed = max(0, enemy_count_last - enemy_count_current)
-        global_combat_reward = enemy_destroyed * combat_factor
-
-        # (c) Relic: reward any increase in team relic points.
-        global_relic_reward = max(0,new_points)*relic_factor
-
-        # Distribute these global rewards evenly among active units.
-        num_active = len(old_available_unit_ids)
-        per_unit_exploration = global_exploration_reward / max(1, num_active)
-        per_unit_combat = global_combat_reward / max(1, num_active)
-        per_unit_relic = global_relic_reward / max(1, num_active)
-
-        # Prepare to accumulate reward breakdowns (summing contributions from all units).
+        #breakdown
         total_breakdown = {
             "movement": 0.0,
             "energy": 0.0,
-            "proximity": 0.0,
             "exploration": 0.0,
-            "combat": 0.0,
-            "relic": 0.0
         }
-        total_reward_sum = 0.0
-        
-        team_positions = np.array(obs["units"]["position"][team])
-        team_energies = np.array(obs["units"]["energy"][team])
+        num_active = len(old_available_unit_ids)
+        per_unit_exploration = global_exploration_reward / max(1, num_active)
+        total_reward_sum=0
+        next_team_positions = np.array(obs["units"]["position"][team])
+        next_team_energies = np.array(obs["units"]["energy"][team])
         last_team_positions = np.array(last_obs["units"]["position"][team])
+        last_team_energies = np.array(last_obs["units"]["energy"][team])
         
-        # Process each unit that was active in the last timestep.
+         
         for unit_id in old_available_unit_ids:
             unit_breakdown = {
                 "movement": 0.0,
                 "energy": 0.0,
-                "proximity": 0.0,
                 "exploration": per_unit_exploration,  # global reward portion
-                "combat": per_unit_combat,
-                "relic": per_unit_relic
             }
             
             # (1) Movement reward: reward based on Manhattan distance moved.
             if last_obs["units_mask"][team][unit_id]:
-                prev_pos = last_team_positions[unit_id]
-                curr_pos = team_positions[unit_id]
-                move_distance = manhattan_distance(origin_pos,curr_pos)
-                if manhattan_distance(prev_pos,origin_pos)<manhattan_distance(origin_pos,curr_pos):
-                    dist_from_origin_bonus=1
-                else:
-                    dist_from_origin_bonus=0
-                unit_breakdown["movement"] = movement_factor * move_distance+dist_from_origin_bonus*dist_from_origin
                 
-                    
-            
-            # (2) Energy reward: bonus proportional to current energy (normalized by 400).
-            current_energy = team_energies[unit_id]
-            unit_breakdown["energy"] = (current_energy / 400.0) * energy_factor
-
-            # (3) Proximity reward: if relics are known, reward being close.
-            if len(self.relic_node_positions) > 0:
-                distances = [
-                    abs(team_positions[unit_id][0] - relic[0]) + abs(team_positions[unit_id][1] - relic[1])
-                    for relic in self.relic_node_positions
-                ]
-                nearest_distance = min(distances)
-                if nearest_distance<=7:
-                    unit_breakdown["proximity"] = proximity_factor * (1 - (nearest_distance / 48.0))
+                #relative distance from the origin reward:
+                prev_pos = last_team_positions[unit_id]
+                curr_pos = next_team_positions[unit_id]
+                if abs(manhattan_distance(curr_pos,origin_pos)-manhattan_distance(prev_pos, origin_pos))<3:
+                    pos_pot_diff = gamma*manhattan_distance(curr_pos,origin_pos)-manhattan_distance(prev_pos, origin_pos)
+                    energy_pot_diff = gamma*next_team_energies[unit_id]-last_team_energies[unit_id]
+                    unit_breakdown["movement"]+=pos_pot_diff*movement_factor
+                    unit_breakdown["energy"]+=energy_pot_diff*energy_factor
                 else:
-                    unit_breakdown["proximity"] = proximity_factor * (1 - (nearest_distance / 48.0))*0.05
-            else:
-                unit_breakdown["proximity"] = 0.0
-
-            # Total reward for this unit is the sum of all contributions.
-            unit_total_reward = sum(unit_breakdown.values())
-            total_reward_sum += unit_total_reward
-
-            # Save the individual reward breakdown for logging (if desired).
-            # For example, you might save unit_breakdown in a separate structure for per-unit analysis.
-            # Here we simply accumulate into total_breakdown.
-            for key in total_breakdown:
-                total_breakdown[key] += unit_breakdown[key]
-
-            # Record the reward and terminal flag for the unit.
-            self.fleet_mem.ships[unit_id].rewards.append(unit_total_reward)
-            self.fleet_mem.ships[unit_id].is_terminals.append(done)
-
-        # Optionally, print (or log) the percentage breakdown if there was any reward.
-        """if per_unit_relic>0:
-            if total_reward_sum > 0:
-                percent_breakdown = {k: (v / total_reward_sum) * 100 for k, v in total_breakdown.items()}
-                print(f"Step:{obs["steps"]} Reward Breakdown (%):", percent_breakdown)
-            else:
-                print("No reward allocated this step.")"""
-
-        # Return the average reward over active units.
+                    print(obs["match_steps"])
+                unit_total_reward =sum(unit_breakdown.values())
+                total_reward_sum += unit_total_reward
+                for key in total_breakdown:
+                    total_breakdown[key] += unit_breakdown[key]
+                # Record the reward and terminal flag for the unit.
+                self.fleet_mem.ships[unit_id].rewards.append(unit_total_reward)
+                self.fleet_mem.ships[unit_id].is_terminals.append(done)
         return total_reward_sum / max(1, num_active), total_breakdown
+
 
 
     def save_model(self):
