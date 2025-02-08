@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from map_processing import Playing_Map
 import numpy as np
 import torch
+import torch.nn.functional as F
+import torch.distributions
 # -------------------------------
 # Basic building blocks
 # -------------------------------
@@ -189,11 +191,7 @@ class BC_Model(nn.Module):
             # sample action using old policy
             map_encoding = self.mapencoder(map_stack)
             logits = self.actor(map_encoding, unit_states_t)
-            # actions_t: [num_units]
-            # values_t:  [num_units, 1]
-        actions_t = torch.argmax(logits, dim=-1)
-        actions_np = actions_t.cpu().numpy()  # shape [num_units]
-        return actions_np
+        return logits
     
 #Acting
 def get_state(unit_pos, nearest_relic_node_position, unit_energy,env_cfg):
@@ -296,15 +294,22 @@ class Agent:
         if len(available_unit_ids) == 0:
             return np.zeros((self.env_cfg["max_units"], 3), dtype=int)
         
-        actions_np = self.model.act(
+        logits = self.model.act(
             unit_states=states_list,
             map_stack=map_data_single,
         )
+
+        # Convert logits to probabilities with softmax.
+        probs = F.softmax(logits, dim=-1)
+
+        # Create a categorical distribution and sample an action.
+        dist = torch.distributions.Categorical(probs)
+        sampled_action_np = dist.sample().cpu().numpy()
         
         # build final action array
         actions_array = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
         for i, unit_id in enumerate(available_unit_ids):
-            actions_array[unit_id, 0] = actions_np[i]
+            actions_array[unit_id, 0] = sampled_action_np[i]
             actions_array[unit_id, 1] = 0
             actions_array[unit_id, 2] = 0
         

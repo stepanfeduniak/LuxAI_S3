@@ -95,8 +95,10 @@ def train_behavior_cloning(
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    
-    ema_loss = 0.0
+    if len(ema_history)==0:
+        ema_loss = 0.0
+    else:
+        ema_loss= ema_history[-1]
     # Optionally plot if you want to see the existing loss
     plot_loss(loss_history, ema_history)
 
