@@ -2,7 +2,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from map_processing import Playing_Map
+import numpy as np
+import torch
 # -------------------------------
 # Basic building blocks
 # -------------------------------
@@ -175,12 +177,61 @@ class BC_Model(nn.Module):
         map_encoding = self.mapencoder(map_states)
         logits = self.actor(map_encoding, unit_states)
         return logits
+    def act(self, unit_states, map_stack):
+        """
+        unit_states: shape [num_units, unit_feature_dim]
+        map_stack:   shape [1, map_channels, H, W], 
+                     or [num_units, map_channels, H, W]
+        """
+        unit_states_t = torch.as_tensor(unit_states, dtype=torch.float32)
 
-class BC_Agent:
+        with torch.no_grad():
+            # sample action using old policy
+            map_encoding = self.mapencoder(map_stack)
+            logits = self.actor(map_encoding, unit_states_t)
+            # actions_t: [num_units]
+            # values_t:  [num_units, 1]
+        actions_t = torch.argmax(logits, dim=-1)
+        actions_np = actions_t.cpu().numpy()  # shape [num_units]
+        return actions_np
+    
+#Acting
+def get_state(unit_pos, nearest_relic_node_position, unit_energy,env_cfg):
+    return [
+        unit_pos[0] / 11.5 - 1,
+        unit_pos[1] / 11.5 - 1,
+        nearest_relic_node_position[0] / 11.5 - 1,
+        nearest_relic_node_position[1] / 11.5 - 1,
+        unit_energy / 200 - 1,
+        env_cfg['unit_sensor_range']/5,
+        env_cfg['unit_move_cost']/10,
+        env_cfg['unit_sap_cost']/50,
+        env_cfg['unit_sap_range']/5,
+        
+    ]
+def manhattan_distance(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+class Agent:
     """
     Behavior Cloning Agent wraps the BC_Model and provides helper functions.
     """
-    def __init__(self, env_cfg, device=None):
+    def __init__(self, player: str, env_cfg):
+        device=None
+        self.player = player
+        self.opp_player = "player_1" if self.player == "player_0" else "player_0"
+        self.team_id = 0 if self.player == "player_0" else 1
+        self.opp_team_id = 1 - self.team_id
+        self.env_cfg = env_cfg
+        self.relic_node_positions = []
+        self.discovered_relic_nodes_ids = set()
+        self.unit_explore_locations = dict()
+        self.play_map = Playing_Map(
+            player_id=self.team_id, 
+            map_size=env_cfg["map_width"],
+            unit_channels=2,
+            map_channels=5,
+            relic_channels=3
+        )
         self.env_cfg = env_cfg
         # The unit state is 9-dimensional (see get_state) and the map has 10 channels.
         self.state_dim = 9  
@@ -188,8 +239,14 @@ class BC_Agent:
         self.action_dim = 6  
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = BC_Model(map_channels_input=10, unit_feature_dim=self.state_dim, action_dim=self.action_dim).to(self.device)
+        path="bc_model.pth"
+        try:
+            self.load_model(path=path)
+        except FileNotFoundError:
+            pass
+        self.last_obs=None
         
-    def predict(self, unit_states, map_state):
+    def act(self, step, obs, remainingOverageTime=60):
         """
         Predicts the actions given the state inputs.
         Args:
@@ -199,12 +256,59 @@ class BC_Agent:
             actions: predicted actions as a NumPy array.
         """
         self.model.eval()
-        with torch.no_grad():
-            unit_states_t = torch.tensor(unit_states, dtype=torch.float32, device=self.device)
-            map_state_t = map_state.to(self.device)
-            logits = self.model(unit_states_t, map_state_t)
-            actions = torch.argmax(logits, dim=-1)
-        return actions.cpu().numpy()
+        # extract data from obs
+        unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
+        unit_positions = np.array(obs["units"]["position"][self.team_id])  # shape (max_units, 2)
+        unit_energys = np.array(obs["units"]["energy"][self.team_id])  # shape (max_units, 1)
+        observed_relic_node_positions = np.array(obs["relic_nodes"])  # shape (max_relic_nodes, 2)
+        observed_relic_nodes_mask = np.array(obs["relic_nodes_mask"])  # shape (max_relic_nodes, )
+        team_points = np.array(obs["team_points"])
+        
+        # map update
+        self.play_map.update_map(obs,self.last_obs)
+        self.last_obs=obs
+        # which units can act?
+        available_unit_ids = np.where(unit_mask)[0]
+
+        # record newly discovered relics
+        visible_relic_node_ids = np.where(observed_relic_nodes_mask)[0]
+        for rid in visible_relic_node_ids:
+            if rid not in self.discovered_relic_nodes_ids:
+                self.discovered_relic_nodes_ids.add(rid)
+                self.relic_node_positions.append(observed_relic_node_positions[rid])
+                self.play_map.add_relic(observed_relic_node_positions[rid])
+
+        # Build the single map stack [1, 4, H, W]
+        
+        map_data_single = self.play_map.map_stack().unsqueeze(0).to(self.device)
+
+        # build unit states
+        states_list = []
+        for unit_id in available_unit_ids:
+            unit_pos = unit_positions[unit_id]
+            unit_energy = unit_energys[unit_id]
+            if len(self.relic_node_positions) > 0:
+                nrp = min(self.relic_node_positions, key=lambda pos: manhattan_distance(unit_pos, pos))
+            else:
+                nrp = np.array([13,13])
+            st = get_state(unit_pos, nrp, unit_energy,self.env_cfg)
+            states_list.append(st)
+        if len(available_unit_ids) == 0:
+            return np.zeros((self.env_cfg["max_units"], 3), dtype=int)
+        
+        actions_np = self.model.act(
+            unit_states=states_list,
+            map_stack=map_data_single,
+        )
+        
+        # build final action array
+        actions_array = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
+        for i, unit_id in enumerate(available_unit_ids):
+            actions_array[unit_id, 0] = actions_np[i]
+            actions_array[unit_id, 1] = 0
+            actions_array[unit_id, 2] = 0
+        
+        return actions_array
     
     def save_model(self, path):
         torch.save(self.model.state_dict(), path)
