@@ -4,3 +4,5 @@ episodes/
 .vscode/
 replays/
 training_samples.hdf5
+/trained_replays
+/training_logs

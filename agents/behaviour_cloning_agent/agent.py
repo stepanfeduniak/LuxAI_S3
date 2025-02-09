@@ -301,7 +301,6 @@ class Agent:
 
         # Convert logits to probabilities with softmax.
         probs = F.softmax(logits, dim=-1)
-
         # Create a categorical distribution and sample an action.
         dist = torch.distributions.Categorical(probs)
         sampled_action_np = dist.sample().cpu().numpy()

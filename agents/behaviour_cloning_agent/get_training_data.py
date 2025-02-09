@@ -180,60 +180,60 @@ def process_all_replays(replay_folder, hdf5_filename, batch_size=1000):
         map_state_buffer = []
         unit_state_buffer = []
         action_buffer = []
-
         # Loop over all JSON files in the replay folder.
         for file in os.listdir(replay_folder):
             if file.endswith(".json"):
                 replay_path = os.path.join(replay_folder, file)
+                replay=get_data(replay_path)
+                team_id=0 if replay["info"]["TeamNames"][0]=="Frog Parade" else 1
                 print(f"Processing replay: {replay_path}")
-                for team_id in [0,1]:
-                    for map_state, unit_state, action in process_replay(replay_path,team_id=team_id):
-                        map_state_buffer.append(map_state)
-                        unit_state_buffer.append(unit_state)
-                        action_buffer.append(action)
-                        sample_count += 1
+                for map_state, unit_state, action in process_replay(replay_path,team_id=team_id):
+                    map_state_buffer.append(map_state)
+                    unit_state_buffer.append(unit_state)
+                    action_buffer.append(action)
+                    sample_count += 1
 
-                        # If we have reached the batch size, flush the buffers to the HDF5 file.
-                        if sample_count % batch_size == 0:
-                            # On the first flush, create the datasets using the shape of the first sample.
-                            if map_state_ds is None:
-                                map_shape = map_state.shape          # e.g., (10, H, W)
-                                unit_shape = unit_state.shape          # should be (9,)
-                                map_state_ds = hf.create_dataset("map_states",
-                                                                shape=(0,) + map_shape,
-                                                                maxshape=(None,) + map_shape,
-                                                                dtype='float32', chunks=True)
-                                unit_state_ds = hf.create_dataset("unit_states",
-                                                                shape=(0,) + unit_shape,
-                                                                maxshape=(None,) + unit_shape,
-                                                                dtype='float32', chunks=True)
-                                action_ds = hf.create_dataset("actions",
-                                                            shape=(0,),
-                                                            maxshape=(None,),
-                                                            dtype='int32', chunks=True)
+                    # If we have reached the batch size, flush the buffers to the HDF5 file.
+                    if sample_count % batch_size == 0:
+                        # On the first flush, create the datasets using the shape of the first sample.
+                        if map_state_ds is None:
+                            map_shape = map_state.shape          # e.g., (10, H, W)
+                            unit_shape = unit_state.shape          # should be (9,)
+                            map_state_ds = hf.create_dataset("map_states",
+                                                            shape=(0,) + map_shape,
+                                                            maxshape=(None,) + map_shape,
+                                                            dtype='float32', chunks=True)
+                            unit_state_ds = hf.create_dataset("unit_states",
+                                                            shape=(0,) + unit_shape,
+                                                            maxshape=(None,) + unit_shape,
+                                                            dtype='float32', chunks=True)
+                            action_ds = hf.create_dataset("actions",
+                                                        shape=(0,),
+                                                        maxshape=(None,),
+                                                        dtype='int32', chunks=True)
 
-                            # Convert buffers to numpy arrays.
-                            map_state_array = np.stack(map_state_buffer, axis=0)
-                            unit_state_array = np.stack(unit_state_buffer, axis=0)
-                            action_array = np.array(action_buffer, dtype=np.int32)
+                        # Convert buffers to numpy arrays.
+                        map_state_array = np.stack(map_state_buffer, axis=0)
+                        unit_state_array = np.stack(unit_state_buffer, axis=0)
+                        action_array = np.array(action_buffer, dtype=np.int32)
 
-                            # Get the current dataset size and resize to accommodate new samples.
-                            current_size = map_state_ds.shape[0]
-                            new_size = current_size + map_state_array.shape[0]
-                            map_state_ds.resize(new_size, axis=0)
-                            unit_state_ds.resize(new_size, axis=0)
-                            action_ds.resize(new_size, axis=0)
+                        # Get the current dataset size and resize to accommodate new samples.
+                        current_size = map_state_ds.shape[0]
+                        new_size = current_size + map_state_array.shape[0]
+                        map_state_ds.resize(new_size, axis=0)
+                        unit_state_ds.resize(new_size, axis=0)
+                        action_ds.resize(new_size, axis=0)
 
-                            # Write the new data.
-                            map_state_ds[current_size:new_size, ...] = map_state_array
-                            unit_state_ds[current_size:new_size, ...] = unit_state_array
-                            action_ds[current_size:new_size, ...] = action_array
+                        # Write the new data.
+                        map_state_ds[current_size:new_size, ...] = map_state_array
+                        unit_state_ds[current_size:new_size, ...] = unit_state_array
+                        action_ds[current_size:new_size, ...] = action_array
 
-                            # Clear the buffers.
-                            map_state_buffer = []
-                            unit_state_buffer = []
-                            action_buffer = []
-                            print(f"Flushed {new_size} samples so far.")
+                        # Clear the buffers.
+                        map_state_buffer = []
+                        unit_state_buffer = []
+                        action_buffer = []
+                        print(f"Flushed {new_size} samples so far.")
 
         # Flush any remaining samples in the buffers.
         if len(map_state_buffer) > 0:

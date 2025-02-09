@@ -124,10 +124,11 @@ def train_behavior_cloning(
                 loss_history.append(loss.item())
 
             if (i + 1) % 100 == 0:
-                print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
+                print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(dataloader)}], Loss: {ema_loss:.4f}")
 
-            if i % 200 == 50:
+            if i % 100 == 50:
                 torch.save(model.state_dict(), "bc_model.pth")
+                print("model_saved")
 
             if i % checkpoint_interval == 0 or i == (len(dataloader) - 1):
                 # Save the updated reward logs
