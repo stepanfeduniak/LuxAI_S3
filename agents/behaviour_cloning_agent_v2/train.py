@@ -94,7 +94,7 @@ def train_behavior_cloning(
     reward_log_path = os.path.join(run_folder, "reward_log.json")
     loaded_reward_logs = load_checkpoint(reward_log_path)
 
-    model = BC_Model(map_channels_input=10, unit_feature_dim=9, action_dim=6).to(device)
+    model = BC_Model(map_channels_input=10, unit_feature_dim=10, action_dim=6).to(device)
     try:
         model.load_state_dict(torch.load(path, map_location=device))
     except:

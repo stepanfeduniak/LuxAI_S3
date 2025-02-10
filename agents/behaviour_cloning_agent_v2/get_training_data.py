@@ -16,17 +16,7 @@ def manhattan_distance(a, b):
     """
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
-def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg):
-    """
-    Returns a normalized 9-dimensional state vector for a unit.
-    
-    The state vector consists of:
-      - Normalized unit position (x, y)
-      - Normalized nearest relic node position (x, y)
-      - Normalized unit energy
-      - Additional normalized environmental parameters:
-          unit_sensor_range, unit_move_cost, unit_sap_cost, unit_sap_range
-    """
+def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg,team):
     return [
         unit_pos[0] / 11.5 - 1,
         unit_pos[1] / 11.5 - 1,
@@ -37,6 +27,7 @@ def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg):
         env_cfg['unit_move_cost'] / 10,
         env_cfg['unit_sap_cost'] / 50,
         env_cfg['unit_sap_range'] / 5,
+        team
     ]
 
 def get_data(file_path):
@@ -113,8 +104,8 @@ def process_replay(replay_path, team_id):
             if len(relic_node_positions) > 0:
                 nrp = min(relic_node_positions, key=lambda pos: abs(unit_pos[0]-pos[0]) + abs(unit_pos[1]-pos[1]))
             else:
-                nrp = np.array([13, 13])
-            unit_state = get_state(unit_pos, nrp, unit_energy, env_cfg)
+                nrp = np.array([-1, -1])
+            unit_state = get_state(unit_pos, nrp, unit_energy, env_cfg,team_id)
             unit_state = np.array(unit_state, dtype=np.float32)
 
             # Get the expert action for this unit.
@@ -150,82 +141,97 @@ def process_all_replays(replay_folder, hdf5_filename, batch_size=1000):
 
         # We will use these shapes when creating the datasets.
         map_shape = None  # e.g., (10, H, W)
-        unit_shape = (9,)
-
+        unit_shape = (10,)
+        player_0_num=0
+        player_1_num=0
         # Loop over replays.
         for file in os.listdir(replay_folder):
             if file.endswith(".json"):
                 replay_path = os.path.join(replay_folder, file)
                 replay = get_data(replay_path)
-                team_id = 0 if replay["info"]["TeamNames"][0] == "Frog Parade" else 1
-                print(replay["info"]["TeamNames"][team_id])
+                team_ids = []
+                if replay["info"]["TeamNames"][0] == "Frog Parade":
+                    team_ids.append(0)
+                    player_0_num+=1
+                if replay["info"]["TeamNames"][1] == "Frog Parade":
+                    team_ids.append(1)
+                    player_1_num+=1
                 # For each replay, keep a mapping from its step to a global map id.
                 replay_map_to_global = {}
-                for step, map_state, unit_state, unit_action in process_replay(replay_path, team_id=team_id):
-                    if step not in replay_map_to_global:
-                        # Assign a new global map id for this step.
-                        replay_map_to_global[step] = global_map_counter
-                        global_map_counter += 1
-                        unique_map_buffer.append(map_state)
-                        # Save the map shape from the very first map state.
-                        if map_shape is None:
-                            map_shape = map_state.shape
+                for team_id in team_ids:
+                    for team_id in team_ids:
+                        for step, map_state, unit_state, unit_action in process_replay(replay_path, team_id=team_id):
+                            # Convert map_state to a NumPy array.
+                            if isinstance(map_state, torch.Tensor):
+                                map_state_np = map_state.cpu().numpy()
+                            else:
+                                map_state_np = np.array(map_state)
+                            map_state_np = map_state_np.astype(np.float32)
+                            
+                            # If map_shape is not yet set, do it here.
+                            if map_shape is None:
+                                map_shape = map_state_np.shape
 
-                    # Retrieve the global map id.
-                    map_id = replay_map_to_global[step]
-                    sample_map_ids_buffer.append(map_id)
-                    unit_state_buffer.append(unit_state)
-                    action_buffer.append(unit_action)
-                    sample_count += 1
+                            key = (team_id, step)   # Use both team_id and step as the key!
+                            if key not in replay_map_to_global:
+                                replay_map_to_global[key] = global_map_counter
+                                global_map_counter += 1
+                                unique_map_buffer.append(map_state_np)
+                            # Retrieve the global map id.
+                            map_id = replay_map_to_global[key]
+                            sample_map_ids_buffer.append(map_id)
+                            unit_state_buffer.append(unit_state)
+                            action_buffer.append(unit_action)
+                            sample_count += 1
 
-                    # Flush buffers if we have reached the batch size.
-                    if sample_count % batch_size == 0:
-                        # Create the datasets on the first flush.
-                        if unique_map_ds is None:
-                            unique_map_ds = hf.create_dataset("unique_map_states",
-                                                              shape=(0,) + map_shape,
-                                                              maxshape=(None,) + map_shape,
-                                                              dtype='float32', chunks=True)
-                            unit_states_ds = hf.create_dataset("unit_states",
-                                                               shape=(0,) + unit_shape,
-                                                               maxshape=(None,) + unit_shape,
-                                                               dtype='float32', chunks=True)
-                            map_ids_ds = hf.create_dataset("map_ids",
-                                                           shape=(0,),
-                                                           maxshape=(None,),
-                                                           dtype='int32', chunks=True)
-                            actions_ds = hf.create_dataset("actions",
-                                                           shape=(0,),
-                                                           maxshape=(None,),
-                                                           dtype='int32', chunks=True)
+                            # Flush buffers if we have reached the batch size.
+                            if sample_count % batch_size == 0:
+                                # Create the datasets on the first flush.
+                                if unique_map_ds is None:
+                                    unique_map_ds = hf.create_dataset("unique_map_states",
+                                                                    shape=(0,) + map_shape,
+                                                                    maxshape=(None,) + map_shape,
+                                                                    dtype='float32', chunks=True)
+                                    unit_states_ds = hf.create_dataset("unit_states",
+                                                                    shape=(0,) + unit_shape,
+                                                                    maxshape=(None,) + unit_shape,
+                                                                    dtype='float32', chunks=True)
+                                    map_ids_ds = hf.create_dataset("map_ids",
+                                                                shape=(0,),
+                                                                maxshape=(None,),
+                                                                dtype='int32', chunks=True)
+                                    actions_ds = hf.create_dataset("actions",
+                                                                shape=(0,),
+                                                                maxshape=(None,),
+                                                                dtype='int32', chunks=True)
 
-                        # Flush the unique map states buffer (if nonempty).
-                        if unique_map_buffer:
-                            cur_unique = unique_map_ds.shape[0]
-                            new_unique = cur_unique + len(unique_map_buffer)
-                            unique_map_ds.resize(new_unique, axis=0)
-                            unique_map_ds[cur_unique:new_unique, ...] = np.stack(unique_map_buffer, axis=0)
-                            unique_map_buffer = []
+                                # Flush the unique map states buffer (if nonempty).
+                                if unique_map_buffer:
+                                    cur_unique = unique_map_ds.shape[0]
+                                    new_unique = cur_unique + len(unique_map_buffer)
+                                    unique_map_ds.resize(new_unique, axis=0)
+                                    unique_map_ds[cur_unique:new_unique, ...] = np.stack(unique_map_buffer, axis=0)
+                                    unique_map_buffer = []
 
-                        # Flush the samples buffers.
-                        sample_map_ids_array = np.array(sample_map_ids_buffer, dtype=np.int32)
-                        unit_state_array = np.stack(unit_state_buffer, axis=0)
-                        action_array = np.array(action_buffer, dtype=np.int32)
-                        cur_samples = map_ids_ds.shape[0]
-                        new_samples = cur_samples + sample_map_ids_array.shape[0]
-                        map_ids_ds.resize(new_samples, axis=0)
-                        unit_states_ds.resize(new_samples, axis=0)
-                        actions_ds.resize(new_samples, axis=0)
-                        map_ids_ds[cur_samples:new_samples] = sample_map_ids_array
-                        unit_states_ds[cur_samples:new_samples, ...] = unit_state_array
-                        actions_ds[cur_samples:new_samples] = action_array
+                                # Flush the samples buffers.
+                                sample_map_ids_array = np.array(sample_map_ids_buffer, dtype=np.int32)
+                                unit_state_array = np.stack(unit_state_buffer, axis=0)
+                                action_array = np.array(action_buffer, dtype=np.int32)
+                                cur_samples = map_ids_ds.shape[0]
+                                new_samples = cur_samples + sample_map_ids_array.shape[0]
+                                map_ids_ds.resize(new_samples, axis=0)
+                                unit_states_ds.resize(new_samples, axis=0)
+                                actions_ds.resize(new_samples, axis=0)
+                                map_ids_ds[cur_samples:new_samples] = sample_map_ids_array
+                                unit_states_ds[cur_samples:new_samples, ...] = unit_state_array
+                                actions_ds[cur_samples:new_samples] = action_array
 
-                        # Clear the sample buffers.
-                        sample_map_ids_buffer = []
-                        unit_state_buffer = []
-                        action_buffer = []
+                                # Clear the sample buffers.
+                                sample_map_ids_buffer = []
+                                unit_state_buffer = []
+                                action_buffer = []
 
-                        print(f"Flushed {new_samples} samples so far.")
+                                print(f"Flushed {new_samples} samples so far.")
 
         # Final flush for any remaining buffers.
         if sample_map_ids_buffer or unique_map_buffer:
@@ -265,17 +271,19 @@ def process_all_replays(replay_folder, hdf5_filename, batch_size=1000):
             print(f"Final flush: total {new_samples} samples stored.")
 
     print("All replays processed and training samples saved.")
+    return player_0_num,player_1_num
 
 # ---------------------------------------------------------------
 # Main Execution
 # ---------------------------------------------------------------
 if __name__ == '__main__':
     # Folder containing replay JSON files
-    replay_folder = "./agents/behaviour_cloning_agent_v2/replays"  
+    
+    replay_folder = "./agents/behaviour_cloning_agent_v2/replays_debug"  
     # Name of the output HDF5 file
     hdf5_filename = "training_samples.hdf5"
     start_time = time.time()
-    process_all_replays(replay_folder, hdf5_filename, batch_size=1000)
+    player_0_num, player_1_num= process_all_replays(replay_folder, hdf5_filename, batch_size=1000)
     end_time = time.time()
     print(f"Processing completed in {end_time - start_time:.2f} seconds.")
     with h5py.File("training_samples.hdf5", "r") as hf:
@@ -283,3 +291,5 @@ if __name__ == '__main__':
         print("Number of samples in unique_map_states:", hf["unique_map_states"].shape[0])
         print("Number of samples in unit_states:", hf["unit_states"].shape[0])
         print("Number of samples in actions:", hf["actions"].shape[0])
+    print(f"Games with player 0: {player_0_num}")
+    print(f"Games with player 1: {player_1_num}")

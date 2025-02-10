@@ -4,9 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from map_processing import Playing_Map
 import numpy as np
-import torch
-import torch.nn.functional as F
 import torch.distributions
+
 # -------------------------------
 # Basic building blocks
 # -------------------------------
@@ -33,19 +32,23 @@ class SqueezeAndExcitation(nn.Module):
 
 class ResBlock(nn.Module):
     """
-    A residual block with two 3x3 convolutions and a squeeze-and-excitation layer.
+    A residual block with two 3x3 convolutions, a squeeze-and-excitation layer,
+    and dropout after the first activation.
     """
-    def __init__(self, channels=128):
+    def __init__(self, channels=128, dropout_p=0.1):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.activation = nn.GELU()
+        # Use Dropout2d for convolutional features
+        self.dropout = nn.Dropout2d(p=dropout_p)
         self.se = SqueezeAndExcitation(channels, reduction=16)
 
     def forward(self, x):
         residual = x
         out = self.conv1(x)
         out = self.activation(out)
+        out = self.dropout(out)
         out = self.conv2(out)
         out = self.se(out)
         return out + residual
@@ -57,22 +60,28 @@ class DoubleConeBlock(nn.Module):
       2. A sequence of ResBlocks.
       3. Two consecutive upsampling conv-transpose layers.
       4. A skip connection adds the block input.
+      
+    Dropout is applied after the downsampling and after the first upsampling activation.
     """
-    def __init__(self, channels=128, num_resblocks=6):
+    def __init__(self, channels=128, num_resblocks=6, dropout_p=0.1):
         super().__init__()
         self.down = nn.Conv2d(channels, channels, kernel_size=4, stride=4)
         self.down_act = nn.GELU()
-        self.mid_blocks = nn.Sequential(*[ResBlock(channels) for _ in range(num_resblocks)])
+        self.dropout_down = nn.Dropout2d(p=dropout_p)
+        self.mid_blocks = nn.Sequential(*[ResBlock(channels, dropout_p=dropout_p) for _ in range(num_resblocks)])
         self.up1 = nn.ConvTranspose2d(channels, channels, kernel_size=3, stride=2, padding=1, output_padding=1)
         self.up_act1 = nn.GELU()
+        self.dropout_up = nn.Dropout2d(p=dropout_p)
         self.up2 = nn.ConvTranspose2d(channels, channels, kernel_size=3, stride=2, padding=1, output_padding=1)
         self.up_act2 = nn.GELU()
 
     def forward(self, x):
         skip = x
         x = self.down_act(self.down(x))
+        x = self.dropout_down(x)
         x = self.mid_blocks(x)
         x = self.up_act1(self.up1(x))
+        x = self.dropout_up(x)
         x = self.up_act2(self.up2(x))
         return x + skip
 
@@ -83,19 +92,22 @@ class DoubleConeBlock(nn.Module):
 class MapEncoder(nn.Module):
     """
     Modified double-cone map encoder that outputs a single feature vector.
+    Added dropout to the fully connected head.
     """
-    def __init__(self, in_channels=10, hidden_dim=128, out_dim=128, num_res_pre=4, num_res_mid=6, num_res_post=4):
+    def __init__(self, in_channels=10, hidden_dim=128, out_dim=128, num_res_pre=3, num_res_mid=5, num_res_post=3, dropout_p=0.1):
         super().__init__()
         self.initial_conv = nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1)
         self.initial_act = nn.GELU()
-        self.resblocks_pre = nn.Sequential(*[ResBlock(hidden_dim) for _ in range(num_res_pre)])
-        self.double_cone = DoubleConeBlock(channels=hidden_dim, num_resblocks=num_res_mid)
-        self.resblocks_post = nn.Sequential(*[ResBlock(hidden_dim) for _ in range(num_res_post)])
+        self.resblocks_pre = nn.Sequential(*[ResBlock(hidden_dim, dropout_p=dropout_p) for _ in range(num_res_pre)])
+        self.double_cone = DoubleConeBlock(channels=hidden_dim, num_resblocks=num_res_mid, dropout_p=dropout_p)
+        self.resblocks_post = nn.Sequential(*[ResBlock(hidden_dim, dropout_p=dropout_p) for _ in range(num_res_post)])
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, 128),
             nn.ReLU(),
+            nn.Dropout(p=dropout_p),
             nn.Linear(128, out_dim),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Dropout(p=dropout_p)
         )
 
     def forward(self, x):
@@ -111,14 +123,17 @@ class MapEncoder(nn.Module):
 class UnitEncoder(nn.Module):
     """
     Fully connected network for encoding the 9-dimensional unit state.
+    Added dropout between fully connected layers.
     """
-    def __init__(self, in_dim, out_dim=64):
+    def __init__(self, in_dim, out_dim=64, dropout_p=0.1):
         super().__init__()
         self.fc = nn.Sequential(
             nn.Linear(in_dim, 128),
             nn.GELU(),
+            nn.Dropout(p=dropout_p),
             nn.Linear(128, 128),
             nn.GELU(),
+            nn.Dropout(p=dropout_p),
             nn.Linear(128, out_dim),
             nn.GELU()
         )
@@ -134,15 +149,18 @@ class BC_Actor(nn.Module):
     """
     The actor network for behavior cloning. It takes a map encoding and a unit state,
     concatenates them, and outputs logits over discrete actions.
+    Dropout is added to the policy head.
     """
-    def __init__(self, map_encoding_dim, unit_feature_dim, n_actions):
+    def __init__(self, map_encoding_dim, unit_feature_dim, n_actions, dropout_p=0.1):
         super().__init__()
-        self.unit_enc = UnitEncoder(in_dim=unit_feature_dim, out_dim=64)
+        self.unit_enc = UnitEncoder(in_dim=unit_feature_dim, out_dim=64, dropout_p=dropout_p)
         self.policy_head = nn.Sequential(
             nn.Linear(map_encoding_dim + 64, 128),
             nn.GELU(),
+            nn.Dropout(p=dropout_p),
             nn.Linear(128, 128),
             nn.GELU(),
+            nn.Dropout(p=dropout_p),
             nn.Linear(128, n_actions)  # Logits output (no softmax here)
         )
 
@@ -179,6 +197,7 @@ class BC_Model(nn.Module):
         map_encoding = self.mapencoder(map_states)
         logits = self.actor(map_encoding, unit_states)
         return logits
+
     def act(self, unit_states, map_stack):
         """
         unit_states: shape [num_units, unit_feature_dim]
@@ -192,29 +211,32 @@ class BC_Model(nn.Module):
             map_encoding = self.mapencoder(map_stack)
             logits = self.actor(map_encoding, unit_states_t)
         return logits
-    
-#Acting
-def get_state(unit_pos, nearest_relic_node_position, unit_energy,env_cfg):
+
+# Acting helper functions
+
+def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg,team):
     return [
         unit_pos[0] / 11.5 - 1,
         unit_pos[1] / 11.5 - 1,
         nearest_relic_node_position[0] / 11.5 - 1,
         nearest_relic_node_position[1] / 11.5 - 1,
         unit_energy / 200 - 1,
-        env_cfg['unit_sensor_range']/5,
-        env_cfg['unit_move_cost']/10,
-        env_cfg['unit_sap_cost']/50,
-        env_cfg['unit_sap_range']/5,
-        
+        env_cfg['unit_sensor_range'] / 5,
+        env_cfg['unit_move_cost'] / 10,
+        env_cfg['unit_sap_cost'] / 50,
+        env_cfg['unit_sap_range'] / 5,
+        team
     ]
+
 def manhattan_distance(a, b):
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
 class Agent:
     """
     Behavior Cloning Agent wraps the BC_Model and provides helper functions.
     """
     def __init__(self, player: str, env_cfg):
-        device=None
+        device = None
         self.player = player
         self.opp_player = "player_1" if self.player == "player_0" else "player_0"
         self.team_id = 0 if self.player == "player_0" else 1
@@ -230,19 +252,21 @@ class Agent:
             map_channels=5,
             relic_channels=3
         )
+        
         self.env_cfg = env_cfg
+        self.unit_sap_range = env_cfg["unit_sap_range"]
         # The unit state is 9-dimensional (see get_state) and the map has 10 channels.
-        self.state_dim = 9  
+        self.state_dim = 10  
         # Expert actions are integers in 0 to 5 (6 discrete actions).
         self.action_dim = 6  
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = BC_Model(map_channels_input=10, unit_feature_dim=self.state_dim, action_dim=self.action_dim).to(self.device)
-        path="bc_model.pth"
+        path = "bc_model.pth"
         try:
             self.load_model(path=path)
         except FileNotFoundError:
             pass
-        self.last_obs=None
+        self.last_obs = None
         
     def act(self, step, obs, remainingOverageTime=60):
         """
@@ -263,8 +287,8 @@ class Agent:
         team_points = np.array(obs["team_points"])
         
         # map update
-        self.play_map.update_map(obs,self.last_obs)
-        self.last_obs=obs
+        self.play_map.update_map(obs, self.last_obs)
+        self.last_obs = obs
         # which units can act?
         available_unit_ids = np.where(unit_mask)[0]
 
@@ -276,8 +300,7 @@ class Agent:
                 self.relic_node_positions.append(observed_relic_node_positions[rid])
                 self.play_map.add_relic(observed_relic_node_positions[rid])
 
-        # Build the single map stack [1, 4, H, W]
-        
+        # Build the single map stack [1, 10, H, W]
         map_data_single = self.play_map.map_stack().unsqueeze(0).to(self.device)
 
         # build unit states
@@ -288,8 +311,8 @@ class Agent:
             if len(self.relic_node_positions) > 0:
                 nrp = min(self.relic_node_positions, key=lambda pos: manhattan_distance(unit_pos, pos))
             else:
-                nrp = np.array([13,13])
-            st = get_state(unit_pos, nrp, unit_energy,self.env_cfg)
+                nrp = np.array([-1, -1])
+            st = get_state(unit_pos, nrp, unit_energy, self.env_cfg,self.team_id)
             states_list.append(st)
         if len(available_unit_ids) == 0:
             return np.zeros((self.env_cfg["max_units"], 3), dtype=int)
@@ -298,7 +321,8 @@ class Agent:
             unit_states=states_list,
             map_stack=map_data_single,
         )
-
+        # Scale logits if needed (the original code scales the first logit by 0.1)
+        logits = logits * torch.tensor([0.4, 1, 1, 1, 1, 1], device=self.device)
         # Convert logits to probabilities with softmax.
         probs = F.softmax(logits, dim=-1)
         # Create a categorical distribution and sample an action.
@@ -320,11 +344,16 @@ class Agent:
                     if opp_mask[opp_id] and pos[0] != -1
                 ]
                 if valid_targets:
-                    target_pos = valid_targets[0]
-                    actions_array[unit_id] = [5, target_pos[0], target_pos[1]]
+                    unit_pos = unit_positions[unit_id]
+                    target_pos = min(valid_targets, key=lambda pos: manhattan_distance(unit_pos, pos))
+                    if manhattan_distance(target_pos, unit_pos) <= self.unit_sap_range:
+                        print(f"Successful attack at {target_pos}")
+                        actions_array[unit_id] = [5, target_pos[0], target_pos[1]]
+                    else:
+                        actions_array[unit_id] = [0, 0, 0]
                 else:
                     actions_array[unit_id] = [0, 0, 0]  # Stay if no valid targets
-        
+
         return actions_array
     
     def save_model(self, path):

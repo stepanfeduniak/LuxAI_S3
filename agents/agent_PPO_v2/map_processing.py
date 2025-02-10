@@ -1,4 +1,8 @@
 import torch
+class RewardSource():
+    def __init__(self,pos):
+        pass
+
 class Playing_Map():
     def __init__(self,player_id,map_size,unit_channels=2,map_channels=5,relic_channels=3):
         self.player_id=player_id
