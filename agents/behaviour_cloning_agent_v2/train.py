@@ -173,6 +173,6 @@ if __name__ == '__main__':
     train_behavior_cloning(
         hdf5_filename, 
         num_epochs=10, 
-        batch_size=32, 
+        batch_size=64, 
         path="bc_model.pth"
     )

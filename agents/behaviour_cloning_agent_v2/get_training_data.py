@@ -97,7 +97,6 @@ def process_replay(replay_path, team_id):
                 discovered_relic_nodes_ids.add(rid)
                 relic_node_positions.append(observed_relic_node_positions[rid])
                 curr_map.add_relic(observed_relic_node_positions[rid])
-
         # Process team units
         unit_mask = np.array(next_obs["units_mask"][team_id])
         available_unit_ids = np.where(unit_mask)[0]
@@ -124,11 +123,11 @@ def process_replay(replay_path, team_id):
             unit_state = np.array(unit_state, dtype=np.float32)
 
             # Get the expert action for this unit.
-            unit_action = int(replay["steps"][step][0]["action"][unit_id][0])
+            unit_action = int(replay["steps"][step][team_id]["action"][unit_id][0])
             # direction (0 = center, 1 = up, 2 = right, 3 = down, 4 = left)
-            
             if team_id==1:
-                unit_action=reverse_action_map[unit_action]
+                unit_action1=reverse_action_map[unit_action]
+                unit_action=unit_action1
             # *** Yield the current step index along with the sample. ***
             yield step, map_state_np, unit_state, unit_action
 

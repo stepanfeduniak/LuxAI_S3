@@ -34,22 +34,26 @@ class ResBlock(nn.Module):
     """
     A residual block with two 3x3 convolutions, a squeeze-and-excitation layer,
     and dropout after the first activation.
+    Added BatchNorm2d after each convolution.
     """
     def __init__(self, channels=128, dropout_p=0.1):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
         self.activation = nn.GELU()
-        # Use Dropout2d for convolutional features
         self.dropout = nn.Dropout2d(p=dropout_p)
         self.se = SqueezeAndExcitation(channels, reduction=16)
 
     def forward(self, x):
         residual = x
         out = self.conv1(x)
+        out = self.bn1(out)
         out = self.activation(out)
         out = self.dropout(out)
         out = self.conv2(out)
+        out = self.bn2(out)
         out = self.se(out)
         return out + residual
 
@@ -62,27 +66,37 @@ class DoubleConeBlock(nn.Module):
       4. A skip connection adds the block input.
       
     Dropout is applied after the downsampling and after the first upsampling activation.
+    BatchNorm2d is added after each conv/conv-transpose.
     """
     def __init__(self, channels=128, num_resblocks=6, dropout_p=0.1):
         super().__init__()
         self.down = nn.Conv2d(channels, channels, kernel_size=4, stride=4)
+        self.down_bn = nn.BatchNorm2d(channels)
         self.down_act = nn.GELU()
         self.dropout_down = nn.Dropout2d(p=dropout_p)
         self.mid_blocks = nn.Sequential(*[ResBlock(channels, dropout_p=dropout_p) for _ in range(num_resblocks)])
         self.up1 = nn.ConvTranspose2d(channels, channels, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.up1_bn = nn.BatchNorm2d(channels)
         self.up_act1 = nn.GELU()
         self.dropout_up = nn.Dropout2d(p=dropout_p)
         self.up2 = nn.ConvTranspose2d(channels, channels, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.up2_bn = nn.BatchNorm2d(channels)
         self.up_act2 = nn.GELU()
 
     def forward(self, x):
         skip = x
-        x = self.down_act(self.down(x))
+        x = self.down(x)
+        x = self.down_bn(x)
+        x = self.down_act(x)
         x = self.dropout_down(x)
         x = self.mid_blocks(x)
-        x = self.up_act1(self.up1(x))
+        x = self.up1(x)
+        x = self.up1_bn(x)
+        x = self.up_act1(x)
         x = self.dropout_up(x)
-        x = self.up_act2(self.up2(x))
+        x = self.up2(x)
+        x = self.up2_bn(x)
+        x = self.up_act2(x)
         return x + skip
 
 # -------------------------------
@@ -93,10 +107,12 @@ class MapEncoder(nn.Module):
     """
     Modified double-cone map encoder that outputs a single feature vector.
     Added dropout to the fully connected head.
+    BatchNorm2d is added after the initial convolution.
     """
-    def __init__(self, in_channels=10, hidden_dim=128, out_dim=128, num_res_pre=3, num_res_mid=5, num_res_post=3, dropout_p=0.1):
+    def __init__(self, in_channels=10, hidden_dim=128, out_dim=128, num_res_pre=2, num_res_mid=4, num_res_post=2, dropout_p=0.1):
         super().__init__()
         self.initial_conv = nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1)
+        self.initial_bn = nn.BatchNorm2d(hidden_dim)
         self.initial_act = nn.GELU()
         self.resblocks_pre = nn.Sequential(*[ResBlock(hidden_dim, dropout_p=dropout_p) for _ in range(num_res_pre)])
         self.double_cone = DoubleConeBlock(channels=hidden_dim, num_resblocks=num_res_mid, dropout_p=dropout_p)
@@ -112,6 +128,7 @@ class MapEncoder(nn.Module):
 
     def forward(self, x):
         x = self.initial_conv(x)
+        x = self.initial_bn(x)
         x = self.initial_act(x)
         x = self.resblocks_pre(x)
         x = self.double_cone(x)
@@ -124,6 +141,7 @@ class UnitEncoder(nn.Module):
     """
     Fully connected network for encoding the 9-dimensional unit state.
     Added dropout between fully connected layers.
+    (Normalization is not added here since the network is shallow and batch sizes are moderate.)
     """
     def __init__(self, in_dim, out_dim=64, dropout_p=0.1):
         super().__init__()
@@ -214,8 +232,8 @@ class BC_Model(nn.Module):
 
 # Acting helper functions
 
-def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg,team):
-    if team==0:
+def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg, team):
+    if team == 0:
         return [
             unit_pos[0] / 11.5 - 1,
             unit_pos[1] / 11.5 - 1,
@@ -230,10 +248,10 @@ def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg,team):
         ]
     else:
         return [
-            (23-unit_pos[1]) / 11.5 - 1,
-            (23-unit_pos[0]) / 11.5 - 1,
-            (23-nearest_relic_node_position[1]) / 11.5 - 1,
-            (23-nearest_relic_node_position[0]) / 11.5 - 1,
+            (23 - unit_pos[1]) / 11.5 - 1,
+            (23 - unit_pos[0]) / 11.5 - 1,
+            (23 - nearest_relic_node_position[1]) / 11.5 - 1,
+            (23 - nearest_relic_node_position[0]) / 11.5 - 1,
             unit_energy / 200 - 1,
             env_cfg['unit_sensor_range'] / 5,
             env_cfg['unit_move_cost'] / 10,
@@ -326,7 +344,7 @@ class Agent:
                 nrp = min(self.relic_node_positions, key=lambda pos: manhattan_distance(unit_pos, pos))
             else:
                 nrp = np.array([-1, -1])
-            st = get_state(unit_pos, nrp, unit_energy, self.env_cfg,self.team_id)
+            st = get_state(unit_pos, nrp, unit_energy, self.env_cfg, self.team_id)
             states_list.append(st)
         if len(available_unit_ids) == 0:
             return np.zeros((self.env_cfg["max_units"], 3), dtype=int)
@@ -344,11 +362,18 @@ class Agent:
         sampled_action_np = dist.sample().cpu().numpy()
         
         # build final action array
+        # direction (0 = center, 1 = up, 2 = right, 3 = down, 4 = left)
+        reverse_action_map={0:0,1:3,2:4,3:1,4:2,5:5}
         actions_array = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
         for i, unit_id in enumerate(available_unit_ids):
-            actions_array[unit_id, 0] = sampled_action_np[i]
-            actions_array[unit_id, 1] = 0
-            actions_array[unit_id, 2] = 0
+            if self.team_id==1:
+                actions_array[unit_id, 0] = reverse_action_map[sampled_action_np[i]]
+                actions_array[unit_id, 1] = 0
+                actions_array[unit_id, 2] = 0
+            else:
+                actions_array[unit_id, 0] = sampled_action_np[i]
+                actions_array[unit_id, 1] = 0
+                actions_array[unit_id, 2] = 0
             if sampled_action_np[i] == 5:
                 # Sap action: pick first valid enemy
                 opp_positions = obs["units"]["position"][self.opp_team_id]
@@ -357,17 +382,19 @@ class Agent:
                     pos for opp_id, pos in enumerate(opp_positions)
                     if opp_mask[opp_id] and pos[0] != -1
                 ]
+
                 if valid_targets:
                     unit_pos = unit_positions[unit_id]
                     target_pos = min(valid_targets, key=lambda pos: manhattan_distance(unit_pos, pos))
-                    if manhattan_distance(target_pos, unit_pos) <= self.unit_sap_range and unit_energys[unit_id]>=self.env_cfg['unit_sap_cost']:
-                        print(f"Successful attack at {target_pos}")
+                    if manhattan_distance(target_pos, unit_pos) <= self.unit_sap_range and unit_energys[unit_id] >= self.env_cfg['unit_sap_cost']:
+                        #print(f"Successful attack at {target_pos}")
                         actions_array[unit_id] = [5, target_pos[0], target_pos[1]]
                     else:
                         actions_array[unit_id] = [0, 0, 0]
                 else:
                     actions_array[unit_id] = [0, 0, 0]  # Stay if no valid targets
-
+        if step%15==0:
+            print(f"Player{self.team_id}, Step:{step}, actions:{actions_array}")
         return actions_array
     
     def save_model(self, path):
