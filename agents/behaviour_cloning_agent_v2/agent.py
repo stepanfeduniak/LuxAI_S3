@@ -215,18 +215,32 @@ class BC_Model(nn.Module):
 # Acting helper functions
 
 def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg,team):
-    return [
-        unit_pos[0] / 11.5 - 1,
-        unit_pos[1] / 11.5 - 1,
-        nearest_relic_node_position[0] / 11.5 - 1,
-        nearest_relic_node_position[1] / 11.5 - 1,
-        unit_energy / 200 - 1,
-        env_cfg['unit_sensor_range'] / 5,
-        env_cfg['unit_move_cost'] / 10,
-        env_cfg['unit_sap_cost'] / 50,
-        env_cfg['unit_sap_range'] / 5,
-        team
-    ]
+    if team==0:
+        return [
+            unit_pos[0] / 11.5 - 1,
+            unit_pos[1] / 11.5 - 1,
+            nearest_relic_node_position[0] / 11.5 - 1,
+            nearest_relic_node_position[1] / 11.5 - 1,
+            unit_energy / 200 - 1,
+            env_cfg['unit_sensor_range'] / 5,
+            env_cfg['unit_move_cost'] / 10,
+            env_cfg['unit_sap_cost'] / 50,
+            env_cfg['unit_sap_range'] / 5,
+            team
+        ]
+    else:
+        return [
+            (23-unit_pos[1]) / 11.5 - 1,
+            (23-unit_pos[0]) / 11.5 - 1,
+            (23-nearest_relic_node_position[1]) / 11.5 - 1,
+            (23-nearest_relic_node_position[0]) / 11.5 - 1,
+            unit_energy / 200 - 1,
+            env_cfg['unit_sensor_range'] / 5,
+            env_cfg['unit_move_cost'] / 10,
+            env_cfg['unit_sap_cost'] / 50,
+            env_cfg['unit_sap_range'] / 5,
+            team
+        ]
 
 def manhattan_distance(a, b):
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
@@ -322,7 +336,7 @@ class Agent:
             map_stack=map_data_single,
         )
         # Scale logits if needed (the original code scales the first logit by 0.1)
-        logits = logits * torch.tensor([0.4, 1, 1, 1, 1, 1], device=self.device)
+        logits = logits * torch.tensor([0.8, 1, 1, 1, 1, 1], device=self.device)
         # Convert logits to probabilities with softmax.
         probs = F.softmax(logits, dim=-1)
         # Create a categorical distribution and sample an action.
@@ -346,7 +360,7 @@ class Agent:
                 if valid_targets:
                     unit_pos = unit_positions[unit_id]
                     target_pos = min(valid_targets, key=lambda pos: manhattan_distance(unit_pos, pos))
-                    if manhattan_distance(target_pos, unit_pos) <= self.unit_sap_range:
+                    if manhattan_distance(target_pos, unit_pos) <= self.unit_sap_range and unit_energys[unit_id]>=self.env_cfg['unit_sap_cost']:
                         print(f"Successful attack at {target_pos}")
                         actions_array[unit_id] = [5, target_pos[0], target_pos[1]]
                     else:

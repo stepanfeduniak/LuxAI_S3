@@ -17,18 +17,33 @@ def manhattan_distance(a, b):
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 def get_state(unit_pos, nearest_relic_node_position, unit_energy, env_cfg,team):
-    return [
-        unit_pos[0] / 11.5 - 1,
-        unit_pos[1] / 11.5 - 1,
-        nearest_relic_node_position[0] / 11.5 - 1,
-        nearest_relic_node_position[1] / 11.5 - 1,
-        unit_energy / 200 - 1,
-        env_cfg['unit_sensor_range'] / 5,
-        env_cfg['unit_move_cost'] / 10,
-        env_cfg['unit_sap_cost'] / 50,
-        env_cfg['unit_sap_range'] / 5,
-        team
-    ]
+    if team==0:
+        return [
+            unit_pos[0] / 11.5 - 1,
+            unit_pos[1] / 11.5 - 1,
+            nearest_relic_node_position[0] / 11.5 - 1,
+            nearest_relic_node_position[1] / 11.5 - 1,
+            unit_energy / 200 - 1,
+            env_cfg['unit_sensor_range'] / 5,
+            env_cfg['unit_move_cost'] / 10,
+            env_cfg['unit_sap_cost'] / 50,
+            env_cfg['unit_sap_range'] / 5,
+            team
+        ]
+    else:
+        return [
+            (23-unit_pos[1]) / 11.5 - 1,
+            (23-unit_pos[0]) / 11.5 - 1,
+            (23-nearest_relic_node_position[1]) / 11.5 - 1,
+            (23-nearest_relic_node_position[0]) / 11.5 - 1,
+            unit_energy / 200 - 1,
+            env_cfg['unit_sensor_range'] / 5,
+            env_cfg['unit_move_cost'] / 10,
+            env_cfg['unit_sap_cost'] / 50,
+            env_cfg['unit_sap_range'] / 5,
+            team
+        ]
+
 
 def get_data(file_path):
     """
@@ -53,7 +68,7 @@ def process_replay(replay_path, team_id):
     replay = get_data(replay_path)
     if replay is None:
         return
-
+    reverse_action_map={0:0,1:3,2:4,3:1,4:2,5:5}
     env_cfg = replay["configuration"]["env_cfg"]
     curr_map = map_processing.Playing_Map(
         player_id=team_id, 
@@ -110,6 +125,10 @@ def process_replay(replay_path, team_id):
 
             # Get the expert action for this unit.
             unit_action = int(replay["steps"][step][0]["action"][unit_id][0])
+            # direction (0 = center, 1 = up, 2 = right, 3 = down, 4 = left)
+            
+            if team_id==1:
+                unit_action=reverse_action_map[unit_action]
             # *** Yield the current step index along with the sample. ***
             yield step, map_state_np, unit_state, unit_action
 
@@ -279,7 +298,7 @@ def process_all_replays(replay_folder, hdf5_filename, batch_size=1000):
 if __name__ == '__main__':
     # Folder containing replay JSON files
     
-    replay_folder = "./agents/behaviour_cloning_agent_v2/replays_debug"  
+    replay_folder = "./agents/behaviour_cloning_agent_v2/replays"  
     # Name of the output HDF5 file
     hdf5_filename = "training_samples.hdf5"
     start_time = time.time()

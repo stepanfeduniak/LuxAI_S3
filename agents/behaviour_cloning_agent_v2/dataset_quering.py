@@ -36,11 +36,11 @@ class HDF5Dataset(Dataset):
 if __name__ == '__main__':
     hdf5_filename = "training_samples.hdf5"
     dataset = HDF5Dataset(hdf5_filename)
-    state, play_map, action = dataset.__getitem__(6000)
+    state, play_map, action = dataset.__getitem__(2500)
     
     # Print the unit state (optional)
     print("Unit State:", state)
-    
+    print("Actions",action)
     # Create a 2x5 grid for heatmaps.
     fig, axes = plt.subplots(2, 5, figsize=(15, 6))
     axes = axes.flatten()  # Make it easier to iterate

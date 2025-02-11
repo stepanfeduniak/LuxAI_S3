@@ -42,18 +42,21 @@ class Playing_Map():
             obs (dict): Current observation.
             last_obs (dict): Previous observation.
         """
+
         # 1. Calculate the actual reward gained this step.
         actual_reward = obs["team_points"][self.player_id] - last_obs["team_points"][self.player_id]
         # 2. Build an occupancy grid for our units.
         occupancy = torch.zeros((self.size, self.size), dtype=torch.float32)
-        positions = obs["units"]["position"][self.player_id]
-        mask = obs["units_mask"][self.player_id]
-        # Convert positions to a tensor.
-        positions_tensor = torch.tensor(positions, dtype=torch.long)
-        if positions_tensor.dim() == 1:
-            positions_tensor = positions_tensor.unsqueeze(0)  # Ensure shape (num_units, 2)
-        mask_tensor = torch.tensor(mask, dtype=torch.bool)
-        active_positions = positions_tensor[mask_tensor]  # shape: (num_active, 2)
+        unit_us=np.array(obs["units"]["position"][self.player_id])
+        unit_mask_us=np.array(obs["units_mask"][self.player_id])
+        active_positions = torch.from_numpy(unit_us[unit_mask_us].T)
+        
+        if self.player_id == 1:
+            active_positions = torch.stack([23 - active_positions[1], 23 - active_positions[0]])
+            if active_positions.dim() == 1:
+                active_positions = active_positions.unsqueeze(1)
+
+        active_positions=active_positions.T
         sure_occupancy=torch.zeros((self.size, self.size), dtype=torch.float32)
         for pos in active_positions:
             x, y = pos.tolist()
@@ -98,21 +101,41 @@ class Playing_Map():
         
     def update_map(self,obs,last_obs=None):
         #Visibility, right now
-        visibility=torch.from_numpy(np.array(obs["sensor_mask"]))
+        
         #Update map
-        rows, cols = torch.where(visibility)
-        self.map_map[rows, cols,1:4] = torch.nn.functional.one_hot(torch.from_numpy(np.array(obs['map_features']['tile_type']))[visibility].long(), num_classes=3).float()
-        self.map_map[:,:,0]=visibility.int()
-        self.map_map[rows,cols,4]= torch.from_numpy(np.array(obs['map_features']['energy']))[visibility].float()/8
-        #Update reverse
-        self.map_map[23-cols, 23-rows, 1:4] = torch.transpose(torch.flip(self.map_map, dims=[0,1]),1,0)[23-cols, 23-rows, 1:4]
-        # might be incorrect:
-        self.map_map[23-cols, 23-rows, 4] = torch.transpose(torch.flip(self.map_map, dims=[0,1]),1,0)[23-cols, 23-rows, 4]
+        if self.player_id==1:
+            visibility=torch.transpose(torch.flip(torch.from_numpy(np.array(obs["sensor_mask"])), dims=[0,1]),1,0)
+            rows, cols = torch.where(visibility)
+            self.map_map[rows, cols,1:4] = torch.nn.functional.one_hot(torch.transpose(torch.flip(torch.from_numpy(np.array(obs['map_features']['tile_type'])), dims=[0,1]),1,0)[visibility].long(), num_classes=3).float()
+            self.map_map[:,:,0]=visibility.int()
+            self.map_map[rows,cols,4]= torch.transpose(torch.flip(torch.from_numpy(np.array(obs['map_features']['energy'])), dims=[0,1]),1,0)[visibility].float()/8
+            #Update reverse
+            self.map_map[23-cols, 23-rows, 1:4] = torch.transpose(torch.flip(self.map_map, dims=[0,1]),1,0)[23-cols, 23-rows, 1:4]
+            # might be incorrect:
+            self.map_map[23-cols, 23-rows, 4] = torch.transpose(torch.flip(self.map_map, dims=[0,1]),1,0)[23-cols, 23-rows, 4]
+        else:
+            visibility=torch.from_numpy(np.array(obs["sensor_mask"]))
+            rows, cols = torch.where(visibility)
+            self.map_map[rows, cols,1:4] = torch.nn.functional.one_hot(torch.from_numpy(np.array(obs['map_features']['tile_type']))[visibility].long(), num_classes=3).float()
+            self.map_map[:,:,0]=visibility.int()
+            self.map_map[rows,cols,4]= torch.from_numpy(np.array(obs['map_features']['energy']))[visibility].float()/8
+            #Update reverse
+            self.map_map[23-cols, 23-rows, 1:4] = torch.transpose(torch.flip(self.map_map, dims=[0,1]),1,0)[23-cols, 23-rows, 1:4]
+            # might be incorrect:
+            self.map_map[23-cols, 23-rows, 4] = torch.transpose(torch.flip(self.map_map, dims=[0,1]),1,0)[23-cols, 23-rows, 4]
         #Update units
         unit_us=np.array(obs["units"]["position"][self.player_id])
         unit_mask_us=np.array(obs["units_mask"][self.player_id])
-        valid_positions_us = unit_us[unit_mask_us].T
+        valid_positions_us = torch.from_numpy(unit_us[unit_mask_us].T)
+        
+        if self.player_id == 1:
+            valid_positions_us = torch.stack([23 - valid_positions_us[1], 23 - valid_positions_us[0]])
+            if valid_positions_us.dim() == 1:
+                valid_positions_us = valid_positions_us.unsqueeze(1)
+
+    
         values_us = torch.ones(valid_positions_us.shape[1], dtype=torch.float32)
+        
         self.unit_map[:,:,0]=0
         self.unit_map[:,:,1]/=2
         self.unit_map[:,:,0].index_put_(
@@ -124,7 +147,13 @@ class Playing_Map():
 
         unit_mask_them=np.array(obs["units_mask"][1-self.player_id])
         unit_them=np.array(obs["units"]["position"][1-self.player_id])
-        valid_positions_them = unit_them[unit_mask_them].T
+        valid_positions_them = torch.from_numpy(unit_them[unit_mask_them].T)
+        
+        
+        if self.player_id == 1:
+            valid_positions_them = torch.stack([23 - valid_positions_them[1], 23 - valid_positions_them[0]])
+            if valid_positions_them.dim() == 1:
+                valid_positions_them = valid_positions_them.unsqueeze(1)
         values_them = torch.ones(valid_positions_them.shape[1], dtype=torch.float32)
         self.unit_map[:,:,1].index_put_(
                 (torch.as_tensor(valid_positions_them[0], dtype=torch.long),
@@ -132,9 +161,11 @@ class Playing_Map():
                 torch.as_tensor(values_them, dtype=torch.float32),
                 accumulate=True
 )
-        relics = np.array(obs["relic_nodes"])
-        relics_mask = np.array(obs["relic_nodes_mask"])
+        relics = torch.from_numpy(np.array(obs["relic_nodes"]))
+        relics_mask = torch.from_numpy(np.array(obs["relic_nodes_mask"]))
         relics_pos = relics[relics_mask].T  # shape: [2, N]
+        if relics_pos.dim() == 1:
+            relics_pos = relics_pos.unsqueeze(0)
         for x, y in zip(relics_pos[0].tolist(), relics_pos[1].tolist()):
             if self.relic_map[x, y, 2] != 1:
                 self.add_relic((x, y))
