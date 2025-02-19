@@ -34,12 +34,11 @@ class HDF5Dataset(Dataset):
         return unit_state, map_state, action
 
 if __name__ == '__main__':
-    hdf5_filename = "training_samples.hdf5"
+    hdf5_filename = "training_samples_debug.hdf5"
     dataset = HDF5Dataset(hdf5_filename)
     actions=[]
-    for step in range(2002,2002+100):
-        state, play_map, action = dataset.__getitem__(step)
-        actions.append(action)
+    state, play_map, action = dataset.__getitem__(6000)
+    actions.append(action)
     # Print the unit state (optional)
     print("Unit State:", state)
     print("Actions",actions)

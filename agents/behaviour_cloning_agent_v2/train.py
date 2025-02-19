@@ -81,7 +81,7 @@ def train_behavior_cloning(
     learning_rate=1e-4, 
     device=None, 
     path=None,
-    checkpoint_interval=50
+    checkpoint_interval=30
 ):
     device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset = HDF5Dataset(hdf5_filename)
@@ -110,7 +110,7 @@ def train_behavior_cloning(
         ema_history2 = loaded_reward_logs.get("ema_history2", [])
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     if len(ema_history1)==0: 
         ema_loss1 = 1.4
         ema_loss2 = 1.4
@@ -143,15 +143,13 @@ def train_behavior_cloning(
                 ema_history2.append(ema_loss2)
                 loss_history.append(loss.item())
 
-            if (i + 1) % 100 == 0:
+            if (i + 1) % 50 == 0:
                 finish_time=time.time()
-                print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(dataloader)}], Loss(beta=.99): {ema_loss2:.4f}, Time per 100 epochs:{finish_time-start_time}")
+                print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(dataloader)}], Loss(beta=.99): {ema_loss2:.4f}, Time per 50 epochs:{finish_time-start_time}")
                 start_time=time.time()
 
-            if i % 100 == 50:
+            if i % 20 == 0:
                 torch.save(model.state_dict(), "bc_model.pth")
-                
-                print("model_saved")
 
             if i % checkpoint_interval == 0 or i == (len(dataloader) - 1):
                 # Save the updated reward logs

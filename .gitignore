@@ -6,3 +6,10 @@ replays/
 training_samples.hdf5
 /trained_replays
 /training_logs
+/trained_replays - Copy
+bc_model.pth
+bc_model_11.pth
+*.pth
+*.hdf5
+training_samples_debug.hdf5
+training_samples_debug.hdf5

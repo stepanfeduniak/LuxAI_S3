@@ -64,4 +64,4 @@ def evaluate_agents(agent_1_cls, agent_2_cls, replay=True, games_to_play=1000, r
     print("Evaluation complete.")
 
 if __name__ == "__main__":
-    evaluate_agents(Agent, Agent, replay=True, games_to_play=1)
+    evaluate_agents(Agent, Agent_0, replay=True, games_to_play=6)

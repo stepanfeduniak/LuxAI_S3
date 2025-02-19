@@ -297,14 +297,14 @@ def process_all_replays(replay_folder, hdf5_filename, batch_size=1000):
 if __name__ == '__main__':
     # Folder containing replay JSON files
     
-    replay_folder = "./agents/behaviour_cloning_agent_v2/replays"  
+    replay_folder = "./agents/behaviour_cloning_agent_v2/replays_debug"  
     # Name of the output HDF5 file
-    hdf5_filename = "training_samples.hdf5"
+    hdf5_filename = "training_samples_debug.hdf5"
     start_time = time.time()
     player_0_num, player_1_num= process_all_replays(replay_folder, hdf5_filename, batch_size=1000)
     end_time = time.time()
     print(f"Processing completed in {end_time - start_time:.2f} seconds.")
-    with h5py.File("training_samples.hdf5", "r") as hf:
+    with h5py.File(hdf5_filename, "r") as hf:
         # Access the correct dataset name
         print("Number of samples in unique_map_states:", hf["unique_map_states"].shape[0])
         print("Number of samples in unit_states:", hf["unit_states"].shape[0])

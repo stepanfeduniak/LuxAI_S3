@@ -5,7 +5,8 @@ import torch.nn.functional as F
 from map_processing import Playing_Map
 import numpy as np
 import torch.distributions
-
+import random
+from lux.utils import direction_to
 # -------------------------------
 # Basic building blocks
 # -------------------------------
@@ -293,7 +294,7 @@ class Agent:
         self.action_dim = 6  
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = BC_Model(map_channels_input=10, unit_feature_dim=self.state_dim, action_dim=self.action_dim).to(self.device)
-        path = "bc_model.pth"
+        path = "bc_model (1).pth"
         try:
             self.load_model(path=path)
         except FileNotFoundError:
@@ -309,6 +310,56 @@ class Agent:
         Returns:
             actions: predicted actions as a NumPy array.
         """
+        if obs["match_steps"]<=20:
+            unit_mask = np.array(obs["units_mask"][self.team_id]) # shape (max_units, )
+            unit_positions = np.array(obs["units"]["position"][self.team_id]) # shape (max_units, 2)
+            unit_energys = np.array(obs["units"]["energy"][self.team_id]) # shape (max_units, 1)
+            observed_relic_node_positions = np.array(obs["relic_nodes"]) # shape (max_relic_nodes, 2)
+            observed_relic_nodes_mask = np.array(obs["relic_nodes_mask"]) # shape (max_relic_nodes, )
+            team_points = np.array(obs["team_points"]) # points of each team, team_points[self.team_id] is the points of the your team
+            self.play_map.update_map(obs, self.last_obs)
+            self.last_obs = obs
+            # ids of units you can control at this timestep
+            available_unit_ids = np.where(unit_mask)[0]
+            # visible relic nodes
+            visible_relic_node_ids = set(np.where(observed_relic_nodes_mask)[0])
+            
+            actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
+
+
+            # basic strategy here is simply to have some units randomly explore and some units collecting as much energy as possible
+            # and once a relic node is found, we send all units to move randomly around the first relic node to gain points
+            # and information about where relic nodes are found are saved for the next match
+            
+            # save any new relic nodes that we discover for the rest of the game.
+            for id in visible_relic_node_ids:
+                if id not in self.discovered_relic_nodes_ids:
+                    self.discovered_relic_nodes_ids.add(id)
+                    self.relic_node_positions.append(observed_relic_node_positions[id])
+                
+
+            # unit ids range from 0 to max_units - 1
+            for unit_id in available_unit_ids:
+                unit_pos = unit_positions[unit_id]
+                unit_energy = unit_energys[unit_id]
+                if len(self.relic_node_positions) > 0:
+                    nearest_relic_node_position = self.relic_node_positions[0]
+                    manhattan_dist = abs(unit_pos[0] - nearest_relic_node_position[0]) + abs(unit_pos[1] - nearest_relic_node_position[1])
+                    
+                    # if close to the relic node we want to hover around it and hope to gain points
+                    if manhattan_dist <= 4:
+                        random_direction = np.random.randint(0, 5)
+                        actions[unit_id] = [random_direction, 0, 0]
+                    else:
+                        # otherwise we want to move towards the relic node
+                        actions[unit_id] = [direction_to(unit_pos, nearest_relic_node_position), 0, 0]
+                else:
+                    # randomly explore by picking a random location on the map and moving there for about 20 steps
+                    if step % 20 == 0 or unit_id not in self.unit_explore_locations:
+                        rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
+                        self.unit_explore_locations[unit_id] = rand_loc
+                    actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
+            return actions
         self.model.eval()
         # extract data from obs
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
@@ -354,7 +405,7 @@ class Agent:
             map_stack=map_data_single,
         )
         # Scale logits if needed (the original code scales the first logit by 0.1)
-        logits = logits * torch.tensor([0.8, 1, 1, 1, 1, 1], device=self.device)
+        logits = logits * torch.tensor([0.4, 1, 1, 1, 1, 1], device=self.device)
         # Convert logits to probabilities with softmax.
         probs = F.softmax(logits, dim=-1)
         # Create a categorical distribution and sample an action.
@@ -366,12 +417,18 @@ class Agent:
         reverse_action_map={0:0,1:3,2:4,3:1,4:2,5:5}
         actions_array = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
         for i, unit_id in enumerate(available_unit_ids):
+            chosen_action=sampled_action_np[i]
+            if chosen_action==0:
+                    p=random.uniform(0,1)
+                    if p>0.8:
+                        chosen_action=random.choice([1,2,3,4])
             if self.team_id==1:
-                actions_array[unit_id, 0] = reverse_action_map[sampled_action_np[i]]
+                actions_array[unit_id, 0] = reverse_action_map[chosen_action]
                 actions_array[unit_id, 1] = 0
                 actions_array[unit_id, 2] = 0
+                
             else:
-                actions_array[unit_id, 0] = sampled_action_np[i]
+                actions_array[unit_id, 0] = chosen_action
                 actions_array[unit_id, 1] = 0
                 actions_array[unit_id, 2] = 0
             if sampled_action_np[i] == 5:
@@ -393,8 +450,7 @@ class Agent:
                         actions_array[unit_id] = [0, 0, 0]
                 else:
                     actions_array[unit_id] = [0, 0, 0]  # Stay if no valid targets
-        if step%15==0:
-            print(f"Player{self.team_id}, Step:{step}, actions:{actions_array}")
+
         return actions_array
     
     def save_model(self, path):
