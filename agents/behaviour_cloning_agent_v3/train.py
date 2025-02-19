@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from agent import ResNetBC_Model  # Import the BC_Model from agent.py
+from agent_resnet import ResNetBC_Model  # Import the BC_Model from agent.py
 import time
 beta1 = 0.95
 beta2= 0.99
@@ -85,7 +85,7 @@ def train_behavior_cloning(
 ):
     device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset = HDF5Dataset(hdf5_filename)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size)
 
 
     # Make sure the directory exists before using it
@@ -96,17 +96,6 @@ def train_behavior_cloning(
     loaded_reward_logs = load_checkpoint(reward_log_path)
 
     model = ResNetBC_Model(map_channels_input=10, unit_feature_dim=10, n_actions=6).to(device)
-    try:
-        model.load_state_dict(torch.load("../input/model-1-bc-luxs3/bc_model_resnet.pth", map_location=device))
-    except:
-        state_dict = torch.load("../input/model-1-bc-luxs3/bc_model_resnet.pth", map_location=device)
-        new_state_dict = {}
-        prefix = "_orig_mod."
-        for key, value in state_dict.items():
-            new_key = key[len(prefix):] if key.startswith(prefix) else key
-            new_state_dict[new_key] = value
-        model.load_state_dict(new_state_dict)
-    
     try:
         state_dict = torch.load("./bc_model_resnet.pth", map_location=device)
         
@@ -168,7 +157,7 @@ def train_behavior_cloning(
                 ema_history2.append(ema_loss2)
                 loss_history.append(loss.item())
 
-            if (i + 1) % 250 == 0:
+            if (i + 1) % 50 == 0:
                 finish_time=time.time()
                 print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(dataloader)}], Loss(beta=.99): {ema_loss2:.4f}, Time per 50 epochs:{finish_time-start_time}")
                 start_time=time.time()
@@ -197,5 +186,5 @@ if __name__ == '__main__':
         hdf5_filename, 
         num_epochs=10, 
         batch_size=64, 
-        path="bc_model_unet.pth"
+        path="bc_model.pth"
     )

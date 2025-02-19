@@ -5,7 +5,7 @@ import json
 import time
 import matplotlib.pyplot as plt
 from luxai_s3.wrappers import LuxAIS3GymEnv, RecordEpisode
-from agent_resnet import Agent_resnet  # Baseline agent
+from agent_test_1 import Agent_test_1  # Baseline agent
 from agent_0 import Agent_0  # Baseline agent
 
 def save_checkpoint(file_path, data):
@@ -78,4 +78,4 @@ def evaluate_agents(agent_1_cls, agent_2_cls, replay=True, games_to_play=1000, r
     print("Evaluation complete.")
 
 if __name__ == "__main__":
-    evaluate_agents(Agent_resnet, Agent_resnet, replay=True, games_to_play=2)
+    evaluate_agents(Agent_test_1, Agent_0, replay=True, games_to_play=2)

@@ -338,6 +338,7 @@ class Agent_resnet:
                 actions_array[unit_id, 0] = sampled_action_np[i]
             actions_array[unit_id, 1] = 0
             actions_array[unit_id, 2] = 0
+            
             if sampled_action_np[i] == 5:
                 # Sap action: pick first valid enemy.
                 opp_positions = obs["units"]["position"][1-self.team_id]

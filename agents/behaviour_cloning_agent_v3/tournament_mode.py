@@ -132,4 +132,4 @@ def play_tournament(agent_1_cls, agent_2_cls,agent_3_cls,agent_4_cls, replay=Tru
     print("Evaluation complete.")
 
 if __name__ == "__main__":
-    play_tournament(Agent_agd4b,Agent_0,Agent_resnet ,Agent_resnet, replay=True, tournament_rounds=20)
+    play_tournament(Agent_agd4b,Agent_0,Agent_test_1 ,Agent_test_1, replay=True, tournament_rounds=20)

@@ -183,21 +183,23 @@ def process_replay(replay_path, team_id):
 
             # New logic: If the expert chooses to stay (action 0) but the expected reward at his position (channel 7)
             # is less than 0.6, then either move toward the nearest relic or—if already very near (<4)—choose a random move.
-            """if unit_action == 0:
+            if unit_action == 0:
                 # Ensure we have a valid position (map_state_np has shape (channels, W, H)).
                 x, y = unit_actual_pos
                 if 0 <= x < map_state_np.shape[1] and 0 <= y < map_state_np.shape[2]:
                     reward_here = map_state_np[7, x, y]
                 else:
                     reward_here = 0.0
-                if reward_here < 0.4:
+                if reward_here < 0.4 and nrp[0]!=-1:
                     if len(relic_node_positions) > 0:
                         if manhattan_distance(unit_pos, nrp) >6:
                             if unit_id%2==0:
                                 unit_action = direction_to(unit_pos, nrp)
                             else:
                                 mrp = max(relic_node_positions, key=lambda pos: manhattan_distance(unit_pos, pos))
-                                unit_action = direction_to(unit_pos, mrp)"""
+                                unit_action = direction_to(unit_pos, mrp)
+                elif unit_actual_pos[0]==0 and nrp[0]!=-1:
+                    unit_action=3
                                 
             
             # For team 1, reverse the action mapping.
@@ -340,11 +342,11 @@ def process_all_replays(replay_folder, hdf5_filename, batch_size=10000):
                                 print(f"Flushed {new_samples} samples so far.")
 
                 # After processing this replay, delete the file.
-                try:
+                """try:
                     os.remove(replay_path)
                     print(f"Deleted replay file: {replay_path}")
                 except Exception as e:
-                    print(f"Error deleting {replay_path}: {e}")
+                    print(f"Error deleting {replay_path}: {e}")"""
 
         # Final flush for any remaining buffers.
         if sample_map_ids_buffer or unique_map_buffer:
@@ -386,12 +388,13 @@ def process_all_replays(replay_folder, hdf5_filename, batch_size=10000):
     print("All replays processed and training samples saved.")
     return player_0_num, player_1_num
 
+
 # ---------------------------------------------------------------
 # Main Execution
 # ---------------------------------------------------------------
 if __name__ == '__main__':
     # Folder containing replay JSON files
-    replay_folder = "./agents/behaviour_cloning_agent_v2/replays_debug"   
+    replay_folder = "./agents/behaviour_cloning_agent_v2/replays"   
     # Name of the output HDF5 file
     hdf5_filename = "training_samples.hdf5"
     start_time = time.time()

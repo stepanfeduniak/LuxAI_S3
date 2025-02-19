@@ -5,6 +5,7 @@ import torch.distributions
 import numpy as np
 from map_processing import Playing_Map
 from lux.utils import direction_to
+import matplotlib.pyplot as plt
 import random
 # -------------------------------
 # Basic building blocks for the U-Net
@@ -240,56 +241,6 @@ class Agent_test_1:
         Returns:
             actions: predicted actions as a NumPy array.
         """
-        if obs["steps"]<=10:
-            unit_mask = np.array(obs["units_mask"][self.team_id]) # shape (max_units, )
-            unit_positions = np.array(obs["units"]["position"][self.team_id]) # shape (max_units, 2)
-            unit_energys = np.array(obs["units"]["energy"][self.team_id]) # shape (max_units, 1)
-            observed_relic_node_positions = np.array(obs["relic_nodes"]) # shape (max_relic_nodes, 2)
-            observed_relic_nodes_mask = np.array(obs["relic_nodes_mask"]) # shape (max_relic_nodes, )
-            team_points = np.array(obs["team_points"]) # points of each team, team_points[self.team_id] is the points of the your team
-            self.play_map.update_map(obs, self.last_obs)
-            self.last_obs = obs
-            # ids of units you can control at this timestep
-            available_unit_ids = np.where(unit_mask)[0]
-            # visible relic nodes
-            visible_relic_node_ids = set(np.where(observed_relic_nodes_mask)[0])
-            
-            actions = np.zeros((self.env_cfg["max_units"], 3), dtype=int)
-
-
-            # basic strategy here is simply to have some units randomly explore and some units collecting as much energy as possible
-            # and once a relic node is found, we send all units to move randomly around the first relic node to gain points
-            # and information about where relic nodes are found are saved for the next match
-            
-            # save any new relic nodes that we discover for the rest of the game.
-            for id in visible_relic_node_ids:
-                if id not in self.discovered_relic_nodes_ids:
-                    self.discovered_relic_nodes_ids.add(id)
-                    self.relic_node_positions.append(observed_relic_node_positions[id])
-                
-
-            # unit ids range from 0 to max_units - 1
-            for unit_id in available_unit_ids:
-                unit_pos = unit_positions[unit_id]
-                unit_energy = unit_energys[unit_id]
-                if len(self.relic_node_positions) > 0 and False:
-                    nearest_relic_node_position = self.relic_node_positions[0]
-                    manhattan_dist = abs(unit_pos[0] - nearest_relic_node_position[0]) + abs(unit_pos[1] - nearest_relic_node_position[1])
-                    
-                    # if close to the relic node we want to hover around it and hope to gain points
-                    if manhattan_dist <= 4:
-                        random_direction = np.random.randint(0, 5)
-                        actions[unit_id] = [random_direction, 0, 0]
-                    else:
-                        # otherwise we want to move towards the relic node
-                        actions[unit_id] = [direction_to(unit_pos, nearest_relic_node_position), 0, 0]
-                else:
-                    # randomly explore by picking a random location on the map and moving there for about 20 steps
-                    if step % 20 == 0 or unit_id not in self.unit_explore_locations:
-                        rand_loc = (np.random.randint(0, self.env_cfg["map_width"]), np.random.randint(0, self.env_cfg["map_height"]))
-                        self.unit_explore_locations[unit_id] = rand_loc
-                    actions[unit_id] = [direction_to(unit_pos, self.unit_explore_locations[unit_id]), 0, 0]
-            return actions
         self.model.eval()
         # extract data from obs
         unit_mask = np.array(obs["units_mask"][self.team_id])  # shape (max_units, )
@@ -371,7 +322,8 @@ class Agent_test_1:
                     target_pos = min(valid_targets, key=lambda pos: manhattan_distance(unit_pos, pos))
                     if manhattan_distance(target_pos, unit_pos) <= self.unit_sap_range and unit_energys[unit_id] >= self.env_cfg['unit_sap_cost']:
                         #print(f"Successful attack at {target_pos}")
-                        actions_array[unit_id] = [5, target_pos[0], target_pos[1]]
+                        #self.show_map(step)
+                        actions_array[unit_id] = [5, target_pos[0]-unit_pos[0], target_pos[1]-unit_pos[1]]
                     else:
                         actions_array[unit_id] = [0, 0, 0]
                 else:
@@ -389,3 +341,21 @@ class Agent_test_1:
             new_key = key[len(prefix):] if key.startswith(prefix) else key
             new_state_dict[new_key] = value
         self.model.load_state_dict(new_state_dict)
+    def show_map(self,step,showmap=False):
+        print(step)
+        if showmap:
+            play_map=self.play_map.map_stack()
+            fig, axes = plt.subplots(2, 5, figsize=(15, 6))
+            axes = axes.flatten()
+            for i in range(10):
+                # Convert the i-th map (which is a torch tensor) to a NumPy array.
+                heatmap = play_map[i, :, :].numpy()
+                # Display the heatmap. You can change the colormap ('cmap') as desired.
+                im = axes[i].imshow(heatmap, cmap='viridis')
+                axes[i].set_title(f"Row {i}")
+                axes[i].axis('off')  # Optional: Hide axis ticks
+                
+                # Optionally add a colorbar to each subplot
+                fig.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
+            plt.tight_layout()
+            plt.show()
